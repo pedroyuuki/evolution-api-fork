@@ -146,14 +146,22 @@ export class ChannelStartupService {
       },
     });
 
-    this.localSettings.rejectCall = data?.rejectCall;
-    this.localSettings.msgCall = data?.msgCall;
-    this.localSettings.groupsIgnore = data?.groupsIgnore;
-    this.localSettings.alwaysOnline = data?.alwaysOnline;
-    this.localSettings.readMessages = data?.readMessages;
-    this.localSettings.readStatus = data?.readStatus;
-    this.localSettings.syncFullHistory = data?.syncFullHistory;
-    this.localSettings.wavoipToken = data?.wavoipToken;
+    // Valores padrão seguros (nunca marca como lida automaticamente)
+    this.localSettings.rejectCall = data?.rejectCall ?? false;
+    this.localSettings.msgCall = data?.msgCall ?? '';
+    this.localSettings.groupsIgnore = data?.groupsIgnore ?? false;
+    this.localSettings.alwaysOnline = data?.alwaysOnline ?? false;
+    this.localSettings.readMessages = data?.readMessages ?? false;
+    this.localSettings.readStatus = data?.readStatus ?? false;
+    this.localSettings.syncFullHistory = data?.syncFullHistory ?? false;
+    this.localSettings.wavoipToken = data?.wavoipToken ?? '';
+
+    // Log para debug
+    this.logger.verbose(
+      `Settings loaded for ${this.instanceName}: ` +
+        `readMessages=${this.localSettings.readMessages}, ` +
+        `alwaysOnline=${this.localSettings.alwaysOnline}`,
+    );
   }
 
   public async setSettings(data: SettingsDto) {

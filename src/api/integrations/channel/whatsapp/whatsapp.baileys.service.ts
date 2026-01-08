@@ -713,10 +713,20 @@ export class BaileysStartupService extends ChannelStartupService {
 
   public async connectToWhatsapp(number?: string): Promise<WASocket> {
     try {
-      this.loadChatwoot();
-      this.loadSettings();
-      this.loadWebhook();
-      this.loadProxy();
+      this.logger.info(`Connecting instance ${this.instanceName}...`);
+
+      await this.loadChatwoot();
+      await this.loadSettings();
+
+      // Log de verificação pós-carregamento
+      this.logger.info(
+        `Instance ${this.instanceName} settings loaded: ` +
+          `readMessages=${this.localSettings.readMessages}, ` +
+          `alwaysOnline=${this.localSettings.alwaysOnline}`,
+      );
+
+      await this.loadWebhook();
+      await this.loadProxy();
 
       // Remontar o messageProcessor para garantir que está funcionando após reconexão
       this.messageProcessor.mount({
@@ -1306,11 +1316,20 @@ export class BaileysStartupService extends ChannelStartupService {
 
           const isVideo = received?.message?.videoMessage;
 
-          if (this.localSettings.readMessages && received.key.id !== 'status@broadcast') {
+          // Validação defensiva ANTES de marcar como lida
+          if (this.localSettings.readMessages === true && received.key.id !== 'status@broadcast') {
+            this.logger.verbose(`Marking message as read: ${received.key.id}`);
             await this.client.readMessages([received.key]);
+          } else if (this.localSettings.readMessages === undefined) {
+            // Log de ALERTA se settings não foram carregadas
+            this.logger.warn(
+              `readMessages is undefined for instance ${this.instanceName}. ` +
+                'Message NOT marked as read (safe default).',
+            );
           }
 
-          if (this.localSettings.readStatus && received.key.id === 'status@broadcast') {
+          if (this.localSettings.readStatus === true && received.key.id === 'status@broadcast') {
+            this.logger.verbose(`Marking status as read: ${received.key.id}`);
             await this.client.readMessages([received.key]);
           }
 
