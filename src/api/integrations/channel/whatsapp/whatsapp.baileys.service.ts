@@ -1380,11 +1380,18 @@ export class BaileysStartupService extends ChannelStartupService {
                   this.logger.log(`Update not read messages ${remoteJid}`);
                   await this.updateChatUnreadMessages(remoteJid);
                 } else if (msg.status === status[4]) {
-                  this.logger.log(`Update readed messages ${remoteJid} - ${timestamp}`);
-                  await this.updateMessagesReadedByTimestamp(remoteJid, timestamp);
+                  // CORREÇÃO: Só marca como lida no banco se readMessages estiver explicitamente true
+                  if (this.localSettings.readMessages === true) {
+                    this.logger.log(`Update readed messages ${remoteJid} - ${timestamp}`);
+                    await this.updateMessagesReadedByTimestamp(remoteJid, timestamp);
+                  } else {
+                    this.logger.verbose(
+                      `Message with status READ not marked in DB (readMessages=${this.localSettings.readMessages}) - ${remoteJid}`,
+                    );
+                  }
                 }
               } else {
-                // is send message by me
+                // is send message by me - SEMPRE marca como lida (mensagens enviadas pelo usuário)
                 this.logger.log(`Update readed messages ${remoteJid} - ${timestamp}`);
                 await this.updateMessagesReadedByTimestamp(remoteJid, timestamp);
               }
@@ -1692,9 +1699,16 @@ export class BaileysStartupService extends ChannelStartupService {
 
               if (!cachedTimestamp) {
                 if (status[update.status] === status[4]) {
-                  this.logger.log(`Update as read in message.update ${remoteJid} - ${timestamp}`);
-                  await this.updateMessagesReadedByTimestamp(remoteJid, timestamp);
-                  await this.baileysCache.set(messageKey, true, this.MESSAGE_CACHE_TTL_SECONDS);
+                  // CORREÇÃO: Só marca como lida no banco se readMessages estiver explicitamente true
+                  if (this.localSettings.readMessages === true) {
+                    this.logger.log(`Update as read in message.update ${remoteJid} - ${timestamp}`);
+                    await this.updateMessagesReadedByTimestamp(remoteJid, timestamp);
+                    await this.baileysCache.set(messageKey, true, this.MESSAGE_CACHE_TTL_SECONDS);
+                  } else {
+                    this.logger.verbose(
+                      `Message update to READ not applied to DB (readMessages=${this.localSettings.readMessages}) - ${remoteJid}`,
+                    );
+                  }
                 }
 
                 await this.prismaRepository.message.update({
