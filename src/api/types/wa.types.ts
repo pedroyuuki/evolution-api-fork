@@ -131,7 +131,15 @@ export declare namespace wa {
     statusReason?: number;
   };
 
-  export type StatusMessage = 'ERROR' | 'PENDING' | 'SERVER_ACK' | 'DELIVERY_ACK' | 'READ' | 'DELETED' | 'PLAYED';
+  export type StatusMessage =
+    | 'ERROR'
+    | 'PENDING'
+    | 'SERVER_ACK'
+    | 'DELIVERY_ACK'
+    | 'READ'
+    | 'DELETED'
+    | 'PLAYED'
+    | 'FAILED';
 }
 
 export const TypeMediaMessage = [

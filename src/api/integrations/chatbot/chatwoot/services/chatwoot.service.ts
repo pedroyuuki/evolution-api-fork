@@ -2405,13 +2405,26 @@ export class ChatwootService {
         return;
       }
 
+      if (event === 'messages.update' && body?.status === 'FAILED') {
+        this.logger.warn(`[Chatwoot] Mensagem falhou - ID: ${body?.keyId}, Erro: ${JSON.stringify(body?.error)}`);
+
+        const message = await this.getMessageByKeyId(instance, body.keyId);
+
+        if (message?.chatwootConversationId) {
+          const errorMessage = this.buildFailedMessageNotification(body?.error);
+
+          await this.createMessage(instance, message.chatwootConversationId, errorMessage, 'outgoing', true);
+        }
+        return;
+      }
+
       if (event === 'messages.read') {
         if (!body?.key?.id || !body?.key?.remoteJid) {
           this.logger.warn('message id not found');
           return;
         }
 
-        const message = await this.getMessageByKeyId(instance, body.key.id);
+        const message = await this.getMessageByKeyId(instance, body.keyId || body.key?.id);
         const conversationId = message?.chatwootConversationId;
         const contactInboxSourceId = message?.chatwootContactInboxSourceId;
 
@@ -2525,6 +2538,77 @@ export class ChatwootService {
     } catch (error) {
       this.logger.error(error);
     }
+  }
+
+  private buildFailedMessageNotification(error?: {
+    code?: number;
+    title?: string;
+    message?: string;
+    details?: string;
+    href?: string;
+  }): string {
+    if (!error?.code) {
+      return '⚠️ Mensagem não entregue\n\n**Motivo:** Falha no envio da mensagem';
+    }
+
+    const errorMessages: Record<number, string> = {
+      131026:
+        '⚠️ Mensagem não entregue\n\n' +
+        '**Motivo:** Não foi possível entregar a mensagem. Possíveis causas:\n' +
+        '- O número não possui WhatsApp\n' +
+        '- Destinatário usa versão antiga do WhatsApp\n' +
+        '- Destinatário não aceitou os novos termos do WhatsApp\n\n' +
+        '**Código:** 131026',
+
+      131042:
+        '⚠️ Mensagem não entregue\n\n' +
+        '**Motivo:** Problema de pagamento na conta do WhatsApp Business.\n' +
+        'Verifique se a forma de pagamento está configurada corretamente.\n\n' +
+        '**Código:** 131042',
+
+      131045:
+        '⚠️ Mensagem não entregue\n\n' +
+        '**Motivo:** Erro no registro do número de telefone.\n' +
+        'O certificado de registro pode estar incorreto ou ausente.\n\n' +
+        '**Código:** 131045',
+
+      131047:
+        '⚠️ Mensagem não entregue\n\n' +
+        '**Motivo:** A mensagem não foi enviada porque mais de 24 horas se passaram desde que o cliente respondeu pela última vez.\n\n' +
+        '**Código:** 131047\n\n' +
+        '_Para enviar mensagens fora da janela de 24h, utilize um template de mensagem aprovado._',
+
+      131049:
+        '⚠️ Mensagem não entregue\n\n' +
+        '**Motivo:** O destinatário atingiu o limite de mensagens de marketing.\n' +
+        'A Meta não entregou a mensagem para manter um ecossistema saudável.\n\n' +
+        '**Código:** 131049\n\n' +
+        '_Tente novamente mais tarde ou envie uma mensagem utilitária._',
+
+      131051:
+        '⚠️ Mensagem não entregue\n\n' +
+        '**Motivo:** Tipo de mensagem não suportado pela API do WhatsApp.\n\n' +
+        '**Código:** 131051',
+
+      131052:
+        '⚠️ Mensagem não entregue\n\n' +
+        '**Motivo:** Erro ao baixar a mídia enviada pelo usuário.\n' +
+        'O arquivo pode estar corrompido ou inacessível.\n\n' +
+        '**Código:** 131052',
+
+      131053:
+        '⚠️ Mensagem não entregue\n\n' +
+        '**Motivo:** Erro ao fazer upload da mídia.\n' +
+        'Verifique se o arquivo está em um formato suportado.\n\n' +
+        '**Código:** 131053',
+    };
+
+    if (errorMessages[error.code]) {
+      return errorMessages[error.code];
+    }
+
+    const details = error.details || error.message || 'Erro desconhecido';
+    return `⚠️ Mensagem não entregue\n\n**Motivo:** ${details}\n**Código:** ${error.code}`;
   }
 
   public normalizeJidIdentifier(remoteJid: string) {

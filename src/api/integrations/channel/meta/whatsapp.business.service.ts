@@ -796,21 +796,62 @@ export class BusinessStartupService extends ChannelStartupService {
               return;
             }
 
+            const messageStatus = item.status.toUpperCase();
+            const isFailed = messageStatus === 'FAILED';
+
             const message: any = {
               messageId: findMessage.id,
               keyId: key.id,
               remoteJid: key.remoteJid,
               fromMe: key.fromMe,
               participant: key?.remoteJid,
-              status: item.status.toUpperCase(),
+              status: messageStatus,
               instanceId: this.instanceId,
             };
 
+            if (isFailed && item.errors && item.errors.length > 0) {
+              const errorInfo = item.errors[0];
+              message.error = {
+                code: errorInfo.code,
+                title: errorInfo.title,
+                message: errorInfo.message,
+                details: errorInfo.error_data?.details,
+                href: errorInfo.href,
+              };
+
+              this.logger.warn(
+                `[Cloud API] Mensagem falhou - ID: ${key.id}, Código: ${errorInfo.code}, Motivo: ${errorInfo.error_data?.details || errorInfo.message}`,
+              );
+            }
+
             this.sendDataWebhook(Events.MESSAGES_UPDATE, message);
 
+            if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED && this.localChatwoot?.enabled) {
+              this.chatwootService.eventWhatsapp(
+                Events.MESSAGES_UPDATE,
+                { instanceName: this.instance.name, instanceId: this.instanceId },
+                message,
+              );
+            }
+
             await this.prismaRepository.messageUpdate.create({
-              data: message,
+              data: {
+                messageId: findMessage.id,
+                keyId: key.id,
+                remoteJid: key.remoteJid,
+                fromMe: key.fromMe,
+                participant: key?.remoteJid,
+                status: messageStatus,
+                instanceId: this.instanceId,
+              },
             });
+
+            if (isFailed || messageStatus !== findMessage.status) {
+              await this.prismaRepository.message.update({
+                where: { id: findMessage.id },
+                data: { status: messageStatus },
+              });
+            }
 
             if (findMessage.webhookUrl) {
               await axios.post(findMessage.webhookUrl, message);
