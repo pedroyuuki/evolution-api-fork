@@ -1386,7 +1386,7 @@ export class BusinessStartupService extends ChannelStartupService {
     return !dominated;
   }
 
-  private async convertAudioToOpus(audioInput: string | Buffer): Promise<Buffer> {
+  private async convertAudioToMp3(audioInput: string | Buffer): Promise<Buffer> {
     return new Promise((resolve, reject) => {
       let inputStream: PassThrough;
 
@@ -1408,7 +1408,7 @@ export class BusinessStartupService extends ChannelStartupService {
       outputStream.on('data', (chunk) => chunks.push(chunk));
       outputStream.on('end', () => {
         const outputBuffer = Buffer.concat(chunks);
-        this.logger.verbose(`[Cloud API] Audio convertido para OGG Opus - ${outputBuffer.length} bytes`);
+        this.logger.verbose(`[Cloud API] Audio convertido para MP3 - ${outputBuffer.length} bytes`);
         resolve(outputBuffer);
       });
       outputStream.on('error', (error) => {
@@ -1420,13 +1420,12 @@ export class BusinessStartupService extends ChannelStartupService {
 
       ffmpeg(inputStream)
         .inputFormat('ogg')
-        .outputFormat('ogg')
+        .outputFormat('mp3')
         .noVideo()
-        .audioCodec('libopus')
+        .audioCodec('libmp3lame')
         .audioBitrate('128k')
-        .audioFrequency(48000)
-        .audioChannels(1)
-        .outputOptions(['-application', 'voip'])
+        .audioFrequency(44100)
+        .audioChannels(2)
         .on('error', (error) => {
           this.logger.warn(`[Cloud API] Tentando conversão sem inputFormat: ${error.message}`);
 
@@ -1443,19 +1442,18 @@ export class BusinessStartupService extends ChannelStartupService {
           retryOutputStream.on('data', (chunk) => retryChunks.push(chunk));
           retryOutputStream.on('end', () => {
             const outputBuffer = Buffer.concat(retryChunks);
-            this.logger.verbose(`[Cloud API] Audio convertido (retry) - ${outputBuffer.length} bytes`);
+            this.logger.verbose(`[Cloud API] Audio convertido para MP3 (retry) - ${outputBuffer.length} bytes`);
             resolve(outputBuffer);
           });
           retryOutputStream.on('error', reject);
 
           ffmpeg(retryInputStream)
-            .outputFormat('ogg')
+            .outputFormat('mp3')
             .noVideo()
-            .audioCodec('libopus')
+            .audioCodec('libmp3lame')
             .audioBitrate('128k')
-            .audioFrequency(48000)
-            .audioChannels(1)
-            .outputOptions(['-application', 'voip'])
+            .audioFrequency(44100)
+            .audioChannels(2)
             .on('error', (retryError) => {
               this.logger.error(`[Cloud API] Falha na conversão de áudio: ${retryError.message}`);
               reject(retryError);
@@ -1470,7 +1468,7 @@ export class BusinessStartupService extends ChannelStartupService {
     try {
       const response = await axios.get(url, { responseType: 'arraybuffer' });
       const buffer = Buffer.from(response.data);
-      return await this.convertAudioToOpus(buffer);
+      return await this.convertAudioToMp3(buffer);
     } catch (error) {
       this.logger.error(`[Cloud API] Erro ao baixar/converter áudio da URL: ${error.message}`);
       throw error;
@@ -1533,14 +1531,14 @@ export class BusinessStartupService extends ChannelStartupService {
         mimetype = mimeTypes.lookup(audio);
 
         if (this.needsAudioConversion(mimetype as string)) {
-          this.logger.verbose(`[Cloud API] Áudio precisa de conversão: ${mimetype} -> OGG Opus`);
+          this.logger.verbose(`[Cloud API] Áudio precisa de conversão: ${mimetype} -> MP3`);
           try {
             const convertedBuffer = await this.convertAudioFromUrl(audio);
             audioData = convertedBuffer.toString('base64');
-            mimetype = 'audio/ogg';
+            mimetype = 'audio/mpeg';
 
             const prepareMedia: any = {
-              fileName: `${hash}.ogg`,
+              fileName: `${hash}.mp3`,
               mediaType: 'audio',
               media: audioData,
               mimetype: mimetype,
@@ -1570,13 +1568,13 @@ export class BusinessStartupService extends ChannelStartupService {
         mimetype = file.mimetype;
 
         if (this.needsAudioConversion(mimetype as string)) {
-          this.logger.verbose(`[Cloud API] Arquivo de áudio precisa de conversão: ${mimetype} -> OGG Opus`);
+          this.logger.verbose(`[Cloud API] Arquivo de áudio precisa de conversão: ${mimetype} -> MP3`);
           try {
-            const convertedBuffer = await this.convertAudioToOpus(file.buffer);
-            mimetype = 'audio/ogg';
+            const convertedBuffer = await this.convertAudioToMp3(file.buffer);
+            mimetype = 'audio/mpeg';
 
             const prepareMedia: any = {
-              fileName: `${hash}.ogg`,
+              fileName: `${hash}.mp3`,
               mediaType: 'audio',
               media: convertedBuffer.toString('base64'),
               mimetype: mimetype,
