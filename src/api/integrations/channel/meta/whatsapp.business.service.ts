@@ -22,15 +22,18 @@ import { ChannelStartupService } from '@api/services/channel.service';
 import { Events, wa } from '@api/types/wa.types';
 import { AudioConverter, Chatwoot, ConfigService, Database, Openai, S3, WaBusiness } from '@config/env.config';
 import { BadRequestException, InternalServerErrorException } from '@exceptions';
+import ffmpegPath from '@ffmpeg-installer/ffmpeg';
 import { createJid } from '@utils/createJid';
 import { status } from '@utils/renderStatus';
 import { sendTelemetry } from '@utils/sendTelemetry';
 import axios from 'axios';
 import { arrayUnique, isURL } from 'class-validator';
 import EventEmitter2 from 'eventemitter2';
+import ffmpeg from 'fluent-ffmpeg';
 import FormData from 'form-data';
 import mimeTypes from 'mime-types';
 import { join } from 'path';
+import { PassThrough } from 'stream';
 
 export class BusinessStartupService extends ChannelStartupService {
   constructor(
@@ -1351,6 +1354,121 @@ export class BusinessStartupService extends ChannelStartupService {
     return mediaSent;
   }
 
+  private readonly SUPPORTED_AUDIO_MIMETYPES = [
+    'audio/aac',
+    'audio/mp4',
+    'audio/m4a',
+    'audio/x-m4a',
+    'audio/amr',
+    'audio/mpeg',
+    'audio/mp3',
+    'audio/ogg; codecs=opus',
+  ];
+
+  private needsAudioConversion(mimetype: string): boolean {
+    if (!mimetype) return false;
+
+    const normalizedMimetype = mimetype.toLowerCase().split(';')[0].trim();
+
+    const dominated = this.SUPPORTED_AUDIO_MIMETYPES.some((supported) => {
+      const normalizedSupported = supported.toLowerCase().split(';')[0].trim();
+      return normalizedMimetype === normalizedSupported;
+    });
+
+    return !dominated;
+  }
+
+  private async convertAudioToOpus(audioInput: string | Buffer): Promise<Buffer> {
+    return new Promise((resolve, reject) => {
+      let inputStream: PassThrough;
+
+      if (Buffer.isBuffer(audioInput)) {
+        inputStream = new PassThrough();
+        inputStream.end(audioInput);
+      } else if (typeof audioInput === 'string') {
+        inputStream = new PassThrough();
+        const buffer = Buffer.from(audioInput, 'base64');
+        inputStream.end(buffer);
+      } else {
+        reject(new Error('Invalid audio input type'));
+        return;
+      }
+
+      const outputStream = new PassThrough();
+      const chunks: Buffer[] = [];
+
+      outputStream.on('data', (chunk) => chunks.push(chunk));
+      outputStream.on('end', () => {
+        const outputBuffer = Buffer.concat(chunks);
+        this.logger.verbose(`[Cloud API] Audio convertido para OGG Opus - ${outputBuffer.length} bytes`);
+        resolve(outputBuffer);
+      });
+      outputStream.on('error', (error) => {
+        this.logger.error(`[Cloud API] Erro no stream de saída: ${error.message}`);
+        reject(error);
+      });
+
+      ffmpeg.setFfmpegPath(ffmpegPath.path);
+
+      ffmpeg(inputStream)
+        .inputFormat('ogg')
+        .outputFormat('ogg')
+        .noVideo()
+        .audioCodec('libopus')
+        .audioBitrate('128k')
+        .audioFrequency(48000)
+        .audioChannels(1)
+        .outputOptions(['-application', 'voip'])
+        .on('error', (error) => {
+          this.logger.warn(`[Cloud API] Tentando conversão sem inputFormat: ${error.message}`);
+
+          const retryInputStream = new PassThrough();
+          if (Buffer.isBuffer(audioInput)) {
+            retryInputStream.end(audioInput);
+          } else {
+            retryInputStream.end(Buffer.from(audioInput, 'base64'));
+          }
+
+          const retryOutputStream = new PassThrough();
+          const retryChunks: Buffer[] = [];
+
+          retryOutputStream.on('data', (chunk) => retryChunks.push(chunk));
+          retryOutputStream.on('end', () => {
+            const outputBuffer = Buffer.concat(retryChunks);
+            this.logger.verbose(`[Cloud API] Audio convertido (retry) - ${outputBuffer.length} bytes`);
+            resolve(outputBuffer);
+          });
+          retryOutputStream.on('error', reject);
+
+          ffmpeg(retryInputStream)
+            .outputFormat('ogg')
+            .noVideo()
+            .audioCodec('libopus')
+            .audioBitrate('128k')
+            .audioFrequency(48000)
+            .audioChannels(1)
+            .outputOptions(['-application', 'voip'])
+            .on('error', (retryError) => {
+              this.logger.error(`[Cloud API] Falha na conversão de áudio: ${retryError.message}`);
+              reject(retryError);
+            })
+            .pipe(retryOutputStream, { end: true });
+        })
+        .pipe(outputStream, { end: true });
+    });
+  }
+
+  private async convertAudioFromUrl(url: string): Promise<Buffer> {
+    try {
+      const response = await axios.get(url, { responseType: 'arraybuffer' });
+      const buffer = Buffer.from(response.data);
+      return await this.convertAudioToOpus(buffer);
+    } catch (error) {
+      this.logger.error(`[Cloud API] Erro ao baixar/converter áudio da URL: ${error.message}`);
+      throw error;
+    }
+  }
+
   public async processAudio(audio: string, number: string, file: any) {
     number = number.replace(/\D/g, '');
     const hash = `${number}-${new Date().getTime()}`;
@@ -1401,33 +1519,101 @@ export class BusinessStartupService extends ChannelStartupService {
       return prepareMedia;
     } else {
       let mimetype: string | false;
-
-      const prepareMedia: any = {
-        fileName: `${hash}.mp3`,
-        mediaType: 'audio',
-        media: audio,
-      };
+      let audioData = audio;
 
       if (isURL(audio)) {
         mimetype = mimeTypes.lookup(audio);
-        prepareMedia.id = audio;
-        prepareMedia.type = 'link';
-      } else if (audio && !file) {
-        mimetype = mimeTypes.lookup(prepareMedia.fileName);
-        const id = await this.getIdMedia(prepareMedia);
-        prepareMedia.id = id;
-        prepareMedia.type = 'id';
+
+        if (this.needsAudioConversion(mimetype as string)) {
+          this.logger.verbose(`[Cloud API] Áudio precisa de conversão: ${mimetype} -> OGG Opus`);
+          try {
+            const convertedBuffer = await this.convertAudioFromUrl(audio);
+            audioData = convertedBuffer.toString('base64');
+            mimetype = 'audio/ogg; codecs=opus';
+
+            const prepareMedia: any = {
+              fileName: `${hash}.ogg`,
+              mediaType: 'audio',
+              media: audioData,
+              mimetype: mimetype,
+            };
+
+            const id = await this.getIdMedia(prepareMedia);
+            prepareMedia.id = id;
+            prepareMedia.type = 'id';
+
+            return prepareMedia;
+          } catch (error) {
+            this.logger.warn(`[Cloud API] Falha na conversão, tentando enviar original: ${error.message}`);
+          }
+        }
+
+        const prepareMedia: any = {
+          fileName: `${hash}.mp3`,
+          mediaType: 'audio',
+          media: audio,
+          mimetype: mimetype,
+          id: audio,
+          type: 'link',
+        };
+
+        return prepareMedia;
       } else if (file) {
-        prepareMedia.media = file;
+        mimetype = file.mimetype;
+
+        if (this.needsAudioConversion(mimetype as string)) {
+          this.logger.verbose(`[Cloud API] Arquivo de áudio precisa de conversão: ${mimetype} -> OGG Opus`);
+          try {
+            const convertedBuffer = await this.convertAudioToOpus(file.buffer);
+            mimetype = 'audio/ogg; codecs=opus';
+
+            const prepareMedia: any = {
+              fileName: `${hash}.ogg`,
+              mediaType: 'audio',
+              media: convertedBuffer.toString('base64'),
+              mimetype: mimetype,
+            };
+
+            const id = await this.getIdMedia(prepareMedia);
+            prepareMedia.id = id;
+            prepareMedia.type = 'id';
+
+            return prepareMedia;
+          } catch (error) {
+            this.logger.warn(`[Cloud API] Falha na conversão do arquivo, tentando enviar original: ${error.message}`);
+          }
+        }
+
+        const prepareMedia: any = {
+          fileName: `${hash}.mp3`,
+          mediaType: 'audio',
+          media: file,
+        };
+
         const id = await this.getIdMedia(prepareMedia, true);
         prepareMedia.id = id;
         prepareMedia.type = 'id';
-        mimetype = file.mimetype;
+        prepareMedia.mimetype = mimetype;
+
+        return prepareMedia;
+      } else if (audio) {
+        mimetype = mimeTypes.lookup(`${hash}.mp3`);
+
+        const prepareMedia: any = {
+          fileName: `${hash}.mp3`,
+          mediaType: 'audio',
+          media: audio,
+          mimetype: mimetype,
+        };
+
+        const id = await this.getIdMedia(prepareMedia);
+        prepareMedia.id = id;
+        prepareMedia.type = 'id';
+
+        return prepareMedia;
       }
 
-      prepareMedia.mimetype = mimetype;
-
-      return prepareMedia;
+      throw new BadRequestException('No audio provided');
     }
   }
 
