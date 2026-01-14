@@ -1373,17 +1373,21 @@ export class BusinessStartupService extends ChannelStartupService {
     'audio/ogg',
   ];
 
-  private needsAudioConversion(mimetype: string): boolean {
-    if (!mimetype) return false;
+  private needsAudioConversion(mimetype: string | false): boolean {
+    if (!mimetype) {
+      this.logger.verbose('[Cloud API] Mimetype não detectado, conversão necessária');
+      return true;
+    }
 
     const normalizedMimetype = mimetype.toLowerCase().split(';')[0].trim();
 
-    const dominated = this.SUPPORTED_AUDIO_MIMETYPES.some((supported) => {
+    const isSupported = this.SUPPORTED_AUDIO_MIMETYPES.some((supported) => {
       const normalizedSupported = supported.toLowerCase().split(';')[0].trim();
       return normalizedMimetype === normalizedSupported;
     });
 
-    return !dominated;
+    this.logger.verbose(`[Cloud API] Mimetype: ${mimetype}, Suportado: ${isSupported}`);
+    return !isSupported;
   }
 
   private async convertAudioToMp3(audioInput: string | Buffer): Promise<Buffer> {
@@ -1529,41 +1533,33 @@ export class BusinessStartupService extends ChannelStartupService {
 
       if (isURL(audio)) {
         mimetype = mimeTypes.lookup(audio);
+        this.logger.verbose(
+          `[Cloud API] Processando áudio de URL - Mimetype detectado: ${mimetype || 'não detectado'}`,
+        );
 
-        if (this.needsAudioConversion(mimetype as string)) {
-          this.logger.verbose(`[Cloud API] Áudio precisa de conversão: ${mimetype} -> MP3`);
-          try {
-            const convertedBuffer = await this.convertAudioFromUrl(audio);
-            audioData = convertedBuffer.toString('base64');
-            mimetype = 'audio/mpeg';
+        this.logger.verbose(`[Cloud API] Áudio de URL será baixado e convertido para MP3`);
+        try {
+          const convertedBuffer = await this.convertAudioFromUrl(audio);
+          audioData = convertedBuffer.toString('base64');
+          mimetype = 'audio/mpeg';
 
-            const prepareMedia: any = {
-              fileName: `${hash}.mp3`,
-              mediaType: 'audio',
-              media: audioData,
-              mimetype: mimetype,
-            };
+          const prepareMedia: any = {
+            fileName: `${hash}.mp3`,
+            mediaType: 'audio',
+            media: audioData,
+            mimetype: mimetype,
+          };
 
-            const id = await this.getIdMedia(prepareMedia);
-            prepareMedia.id = id;
-            prepareMedia.type = 'id';
+          const id = await this.getIdMedia(prepareMedia);
+          prepareMedia.id = id;
+          prepareMedia.type = 'id';
 
-            return prepareMedia;
-          } catch (error) {
-            this.logger.warn(`[Cloud API] Falha na conversão, tentando enviar original: ${error.message}`);
-          }
+          this.logger.verbose(`[Cloud API] Áudio convertido e upload concluído - ID: ${id}`);
+          return prepareMedia;
+        } catch (error) {
+          this.logger.error(`[Cloud API] Falha na conversão do áudio: ${error.message}`);
+          throw new InternalServerErrorException(`Falha ao converter áudio: ${error.message}`);
         }
-
-        const prepareMedia: any = {
-          fileName: `${hash}.mp3`,
-          mediaType: 'audio',
-          media: audio,
-          mimetype: mimetype,
-          id: audio,
-          type: 'link',
-        };
-
-        return prepareMedia;
       } else if (file) {
         mimetype = file.mimetype;
 
