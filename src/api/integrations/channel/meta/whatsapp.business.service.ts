@@ -1276,10 +1276,18 @@ export class BusinessStartupService extends ChannelStartupService {
         this.configService.get<WaBusiness>('WA_BUSINESS').VERSION
       }/${this.number}/media`;
 
+      this.logger.verbose(
+        `[Cloud API] Fazendo upload de mídia - Arquivo: ${mediaMessage.fileName}, Mimetype: ${mimetype}`,
+      );
+
       const res = await axios.post(url, formData, { headers });
+      this.logger.verbose(`[Cloud API] Upload concluído - Media ID: ${res.data.id}`);
       return res.data.id;
     } catch (error) {
-      this.logger.error(error.response.data);
+      this.logger.error(
+        `[Cloud API] Erro no upload de mídia - Arquivo: ${mediaMessage.fileName}, Mimetype: ${mediaMessage.mimetype}`,
+      );
+      this.logger.error(`[Cloud API] Detalhes do erro: ${JSON.stringify(error.response?.data || error.message)}`);
       throw new InternalServerErrorException(error?.toString() || error);
     }
   }
@@ -1362,7 +1370,7 @@ export class BusinessStartupService extends ChannelStartupService {
     'audio/amr',
     'audio/mpeg',
     'audio/mp3',
-    'audio/ogg; codecs=opus',
+    'audio/ogg',
   ];
 
   private needsAudioConversion(mimetype: string): boolean {
@@ -1529,7 +1537,7 @@ export class BusinessStartupService extends ChannelStartupService {
           try {
             const convertedBuffer = await this.convertAudioFromUrl(audio);
             audioData = convertedBuffer.toString('base64');
-            mimetype = 'audio/ogg; codecs=opus';
+            mimetype = 'audio/ogg';
 
             const prepareMedia: any = {
               fileName: `${hash}.ogg`,
@@ -1565,7 +1573,7 @@ export class BusinessStartupService extends ChannelStartupService {
           this.logger.verbose(`[Cloud API] Arquivo de áudio precisa de conversão: ${mimetype} -> OGG Opus`);
           try {
             const convertedBuffer = await this.convertAudioToOpus(file.buffer);
-            mimetype = 'audio/ogg; codecs=opus';
+            mimetype = 'audio/ogg';
 
             const prepareMedia: any = {
               fileName: `${hash}.ogg`,
