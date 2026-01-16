@@ -95,15 +95,15 @@ class ChatwootImport {
 
       let contactsChunk: Contact[] = this.sliceIntoChunks(contacts, 3000);
       while (contactsChunk.length > 0) {
-        const labelSql = `SELECT id FROM labels WHERE title = '${provider.nameInbox}' AND account_id = ${provider.accountId} LIMIT 1`;
+        const labelSql = `SELECT id FROM labels WHERE title = $1 AND account_id = $2 LIMIT 1`;
 
-        let labelId = (await pgClient.query(labelSql))?.rows[0]?.id;
+        let labelId = (await pgClient.query(labelSql, [provider.nameInbox, provider.accountId]))?.rows[0]?.id;
 
         if (!labelId) {
           // creating label in chatwoot db and getting the id
-          const sqlLabel = `INSERT INTO labels (title, color, show_on_sidebar, account_id, created_at, updated_at) VALUES ('${provider.nameInbox}', '#34039B', true, ${provider.accountId}, NOW(), NOW()) RETURNING id`;
+          const sqlLabel = `INSERT INTO labels (title, color, show_on_sidebar, account_id, created_at, updated_at) VALUES ($1, '#34039B', true, $2, NOW(), NOW()) RETURNING id`;
 
-          labelId = (await pgClient.query(sqlLabel))?.rows[0]?.id;
+          labelId = (await pgClient.query(sqlLabel, [provider.nameInbox, provider.accountId]))?.rows[0]?.id;
         }
 
         // inserting contacts in chatwoot db
@@ -141,29 +141,29 @@ class ChatwootImport {
 
         totalContactsImported += (await pgClient.query(sqlInsert, bindInsert))?.rowCount ?? 0;
 
-        const sqlTags = `SELECT id FROM tags WHERE name = '${provider.nameInbox}' LIMIT 1`;
+        const sqlTags = `SELECT id FROM tags WHERE name = $1 LIMIT 1`;
 
-        const tagData = (await pgClient.query(sqlTags))?.rows[0];
+        const tagData = (await pgClient.query(sqlTags, [provider.nameInbox]))?.rows[0];
         let tagId = tagData?.id;
 
-        const sqlTag = `INSERT INTO tags (name, taggings_count) VALUES ('${provider.nameInbox}', ${totalContactsImported}) ON CONFLICT (name) DO UPDATE SET taggings_count = tags.taggings_count + ${totalContactsImported} RETURNING id`;
+        const sqlTag = `INSERT INTO tags (name, taggings_count) VALUES ($1, $2) ON CONFLICT (name) DO UPDATE SET taggings_count = tags.taggings_count + $2 RETURNING id`;
 
-        tagId = (await pgClient.query(sqlTag))?.rows[0]?.id;
-
-        await pgClient.query(sqlTag);
+        tagId = (await pgClient.query(sqlTag, [provider.nameInbox, totalContactsImported]))?.rows[0]?.id;
 
         let sqlInsertLabel = `INSERT INTO taggings (tag_id, taggable_type, taggable_id, context, created_at) VALUES `;
+        const bindInsertLabel = [tagId, 'Contact', 'labels', provider.accountId];
 
         contactsChunk.forEach((contact) => {
-          const bindTaggableId = `(SELECT id FROM contacts WHERE identifier = '${contact.remoteJid}' AND account_id = ${provider.accountId})`;
-          sqlInsertLabel += `($1, $2, ${bindTaggableId}, $3, NOW()),`;
+          bindInsertLabel.push(contact.remoteJid);
+          const bindIdentifier = `$${bindInsertLabel.length}`;
+          sqlInsertLabel += `($1, $2, (SELECT id FROM contacts WHERE identifier = ${bindIdentifier} AND account_id = $4), $3, NOW()),`;
         });
 
         if (sqlInsertLabel.slice(-1) === ',') {
           sqlInsertLabel = sqlInsertLabel.slice(0, -1);
         }
 
-        await pgClient.query(sqlInsertLabel, [tagId, 'Contact', 'labels']);
+        await pgClient.query(sqlInsertLabel, bindInsertLabel);
 
         contactsChunk = this.sliceIntoChunks(contacts, 3000);
       }
