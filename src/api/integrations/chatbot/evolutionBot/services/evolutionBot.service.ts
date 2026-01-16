@@ -132,6 +132,10 @@ export class EvolutionBotService extends BaseChatbotService<EvolutionBot, Evolut
 
       if (instance.integration === Integration.WHATSAPP_BAILEYS) {
         await instance.client.sendPresenceUpdate('paused', remoteJid);
+        // Restaurar presença para 'unavailable' para manter notificações no celular
+        if (instance.localSettings?.alwaysOnline === false) {
+          await instance.client.sendPresenceUpdate('unavailable');
+        }
       }
 
       let message = response?.data?.message;

@@ -2375,6 +2375,10 @@ export class BaileysStartupService extends ChannelStartupService {
 
           await this.client.sendPresenceUpdate('paused', sender);
         }
+        // Restaurar presença para 'unavailable' para manter notificações no celular
+        if (this.localSettings?.alwaysOnline === false) {
+          await this.client.sendPresenceUpdate('unavailable');
+        }
       }
 
       const linkPreview = options?.linkPreview != false ? undefined : false;
@@ -2643,6 +2647,11 @@ export class BaileysStartupService extends ChannelStartupService {
         await delay(data?.delay);
 
         await this.client.sendPresenceUpdate('paused', sender);
+      }
+
+      // Restaurar presença para 'unavailable' para manter notificações no celular
+      if (this.localSettings?.alwaysOnline === false) {
+        await this.client.sendPresenceUpdate('unavailable');
       }
 
       return { presence: data.presence };
