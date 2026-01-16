@@ -4728,7 +4728,11 @@ export class BaileysStartupService extends ChannelStartupService {
   }
 
   private async syncChatwootLostMessages() {
-    if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED && this.localChatwoot?.enabled) {
+    if (
+      this.configService.get<Chatwoot>('CHATWOOT').ENABLED &&
+      this.localChatwoot?.enabled &&
+      this.localChatwoot?.importMessages
+    ) {
       const chatwootConfig = await this.findChatwoot();
       const prepare = (message: any) => this.prepareMessage(message);
       this.chatwootService.syncLostMessages({ instanceName: this.instance.name }, chatwootConfig, prepare);
