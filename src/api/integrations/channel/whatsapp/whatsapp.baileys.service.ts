@@ -510,6 +510,21 @@ export class BaileysStartupService extends ChannelStartupService {
         profilePictureUrl: this.instance.profilePictureUrl,
         ...this.stateConnection,
       });
+
+      // CORREÇÃO CRÍTICA: Se alwaysOnline está desativado, marcar como 'unavailable'
+      // Isso é OBRIGATÓRIO para que o celular receba notificações push
+      // Documentação Baileys: "If a desktop client is active, WA doesn't send push notifications
+      // to the device. If you would like to receive said notifications -- mark your Baileys
+      // client offline using sock.sendPresenceUpdate('unavailable')"
+      // Issues relacionados: #431, #607, #1734, #512
+      if (this.localSettings.alwaysOnline === false) {
+        try {
+          await this.client.sendPresenceUpdate('unavailable');
+          this.logger.info(`Instance ${this.instanceName}: Presence set to 'unavailable' for mobile notifications`);
+        } catch (error) {
+          this.logger.warn(`Failed to set presence to unavailable: ${error?.message}`);
+        }
+      }
     }
 
     if (connection === 'connecting') {
