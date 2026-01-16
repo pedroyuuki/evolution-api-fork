@@ -356,8 +356,7 @@ export class ChatwootService {
         }
       }
 
-      this.logger.error('Error creating contact');
-      console.log(error);
+      this.logger.error(`Error creating contact: ${error?.message || error}`);
       return null;
     }
   }
@@ -508,7 +507,7 @@ export class ChatwootService {
       });
     }
 
-    if (!contact && contact?.payload?.length === 0) {
+    if (!contact || !contact?.payload || contact?.payload?.length === 0) {
       this.logger.warn('contact not found');
       return null;
     }
@@ -730,7 +729,12 @@ export class ChatwootService {
 
         if (isGroup) {
           this.logger.verbose(`Processing group conversation`);
-          const group = await this.waMonitor.waInstances[instance.instanceName].client.groupMetadata(chatId);
+          const waInstance = this.waMonitor.waInstances[instance.instanceName];
+          if (!waInstance?.client) {
+            this.logger.warn('WhatsApp client not available for group metadata');
+            return null;
+          }
+          const group = await waInstance.client.groupMetadata(chatId);
           this.logger.verbose(`Group metadata: JID:${group.JID} - Subject:${group?.subject || group?.Name}`);
 
           const participantJid = isLid && !body.key.fromMe ? body.key.participantAlt : body.key.participant;
@@ -1026,7 +1030,7 @@ export class ChatwootService {
 
     if (!conversation) {
       this.logger.warn('conversation not found');
-      return;
+      return null;
     }
 
     const message = await client.messages.create({
@@ -2140,7 +2144,8 @@ export class ChatwootService {
               body.key.addressingMode === 'lid' && !body.key.fromMe && body.key.participantAlt
                 ? body.key.participantAlt.split('@')[0].split(':')[0]
                 : body.key.participant.split('@')[0].split(':')[0];
-            const formattedPhoneNumber = parsePhoneNumberFromString(`+${rawPhoneNumber}`).formatInternational();
+            const parsedPhone = parsePhoneNumberFromString(`+${rawPhoneNumber}`);
+            const formattedPhoneNumber = parsedPhone?.formatInternational() ?? rawPhoneNumber;
 
             let content: string;
 
@@ -2322,7 +2327,8 @@ export class ChatwootService {
             body.key.addressingMode === 'lid' && !body.key.fromMe && body.key.participantAlt
               ? body.key.participantAlt.split('@')[0].split(':')[0]
               : body.key.participant.split('@')[0].split(':')[0];
-          const formattedPhoneNumber = parsePhoneNumberFromString(`+${rawPhoneNumber}`).formatInternational();
+          const parsedPhone = parsePhoneNumberFromString(`+${rawPhoneNumber}`);
+          const formattedPhoneNumber = parsedPhone?.formatInternational() ?? rawPhoneNumber;
 
           let content: string;
 
