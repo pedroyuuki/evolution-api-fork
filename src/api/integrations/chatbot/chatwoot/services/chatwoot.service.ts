@@ -1268,6 +1268,35 @@ export class ChatwootService {
     }
   }
 
+  private extractErrorMessage(error: any): string {
+    if (!error) return '';
+    if (typeof error === 'string') return error;
+    if (error instanceof Error) return error.message;
+    if (error?.message) {
+      if (Array.isArray(error.message)) {
+        return error.message.map((m: any) => (typeof m === 'string' ? m : JSON.stringify(m))).join(', ');
+      }
+      return String(error.message);
+    }
+    if (error?.error) return String(error.error);
+    try {
+      return JSON.stringify(error);
+    } catch {
+      return 'Erro desconhecido';
+    }
+  }
+
+  private isInstanceDisconnectedError(error: any): boolean {
+    const errorStr = this.extractErrorMessage(error);
+    return (
+      errorStr.includes('presenceSubscribe') ||
+      errorStr.includes('sendPresenceUpdate') ||
+      errorStr.includes('Cannot read properties of undefined') ||
+      errorStr.includes('Instance disconnected') ||
+      error?.message === 'Instance disconnected'
+    );
+  }
+
   public async onSendMessageError(instance: InstanceDto, conversation: number, error?: any) {
     this.logger.verbose(`onSendMessageError ${JSON.stringify(error)}`);
 
@@ -1277,27 +1306,33 @@ export class ChatwootService {
       return;
     }
 
-    if (error && error?.status === 400 && error?.message[0]?.exists === false) {
-      client.messages.create({
-        accountId: this.provider.accountId,
-        conversationId: conversation,
-        data: {
-          content: `${i18next.t('cw.message.numbernotinwhatsapp')}`,
-          message_type: 'outgoing',
-          private: true,
-        },
-      });
+    let content: string;
 
-      return;
+    // 1. Número não está no WhatsApp (manter lógica existente)
+    if (error && error?.status === 400 && error?.message[0]?.exists === false) {
+      content = i18next.t('cw.message.numbernotinwhatsapp');
+    }
+    // 2. Instância desconectada
+    else if (this.isInstanceDisconnectedError(error)) {
+      content = i18next.t('cw.message.instancedisconnected');
+    }
+    // 3. Instância não encontrada
+    else if (error === 'Instance not found' || error?.message === 'Instance not found') {
+      content = i18next.t('cw.message.instancenotfound');
+    }
+    // 4. Erro genérico (melhorado)
+    else {
+      const errorMsg = this.extractErrorMessage(error);
+      content = i18next.t('cw.message.notsent', {
+        error: errorMsg ? `_${errorMsg}_` : '',
+      });
     }
 
     client.messages.create({
       accountId: this.provider.accountId,
       conversationId: conversation,
       data: {
-        content: i18next.t('cw.message.notsent', {
-          error: error ? `_${error.toString()}_` : '',
-        }),
+        content,
         message_type: 'outgoing',
         private: true,
       },
@@ -1451,6 +1486,16 @@ export class ChatwootService {
           return { message: 'bot' };
         }
 
+        const connectionState = waInstance?.connectionStatus?.state;
+        if (connectionState !== 'open' && body.conversation?.id) {
+          this.logger.warn(`Instance ${instance.instanceName} is not connected (state: ${connectionState})`);
+          this.onSendMessageError(instance, body.conversation?.id, {
+            message: 'Instance disconnected',
+            state: connectionState,
+          });
+          return { message: 'bot' };
+        }
+
         let formatText: string;
         if (senderName === null || senderName === undefined) {
           formatText = messageReceived;
@@ -1475,15 +1520,19 @@ export class ChatwootService {
                 quoted: await this.getQuotedMessage(body, instance),
               };
 
-              const messageSent = await this.sendAttachment(
-                waInstance,
-                chatId,
-                attachment.data_url,
-                formatText,
-                options,
-              );
+              let messageSent: any;
+              try {
+                messageSent = await this.sendAttachment(waInstance, chatId, attachment.data_url, formatText, options);
+              } catch (attachmentError) {
+                this.logger.error(
+                  `Failed to send attachment to ${chatId}: ${this.extractErrorMessage(attachmentError)}`,
+                );
+                if (body.conversation?.id) {
+                  this.onSendMessageError(instance, body.conversation?.id, attachmentError);
+                }
+              }
               if (!messageSent && body.conversation?.id) {
-                this.onSendMessageError(instance, body.conversation?.id);
+                this.onSendMessageError(instance, body.conversation?.id, 'Attachment not sent');
               }
 
               await this.updateChatwootMessageId(
@@ -1534,6 +1583,7 @@ export class ChatwootService {
               );
             } catch (error) {
               if (!messageSent && body.conversation?.id) {
+                this.logger.error(`Failed to send text message to ${chatId}: ${this.extractErrorMessage(error)}`);
                 this.onSendMessageError(instance, body.conversation?.id, error);
               }
               throw error;

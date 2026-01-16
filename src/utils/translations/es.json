@@ -23,5 +23,7 @@
   "cw.contactMessage.number": "Numero",
   "cw.message.notsent": "🚨 El mensaje no se pudo enviar. Comprueba tu conexión. {{error}}",
   "cw.message.numbernotinwhatsapp": "🚨 El mensaje no fue enviado porque el contacto no es un número de Whatsapp válido.",
+  "cw.message.instancedisconnected": "🚨 El mensaje no fue enviado porque la instancia está desconectada de WhatsApp.",
+  "cw.message.instancenotfound": "🚨 El mensaje no fue enviado porque la instancia no fue encontrada.",
   "cw.message.edited": "Mensaje editado"
 }
