@@ -6,7 +6,7 @@ import { chatwootImport } from '@api/integrations/chatbot/chatwoot/utils/chatwoo
 import { PrismaRepository } from '@api/repository/repository.service';
 import { CacheService } from '@api/services/cache.service';
 import { WAMonitoringService } from '@api/services/monitor.service';
-import { Events } from '@api/types/wa.types';
+import { Events, Integration } from '@api/types/wa.types';
 import { Chatwoot, ConfigService, Database, HttpServer } from '@config/env.config';
 import { Logger } from '@config/logger.config';
 import ChatwootClient, {
@@ -730,43 +730,47 @@ export class ChatwootService {
         if (isGroup) {
           this.logger.verbose(`Processing group conversation`);
           const waInstance = this.waMonitor.waInstances[instance.instanceName];
-          if (!waInstance?.client) {
-            this.logger.warn('WhatsApp client not available for group metadata');
-            return null;
-          }
-          const group = await waInstance.client.groupMetadata(chatId);
-          this.logger.verbose(`Group metadata: JID:${group.JID} - Subject:${group?.subject || group?.Name}`);
 
-          const participantJid = isLid && !body.key.fromMe ? body.key.participantAlt : body.key.participant;
-          nameContact = `${group.subject} (GROUP)`;
-
-          const picture_url = await this.waMonitor.waInstances[instance.instanceName].profilePicture(
-            participantJid.split('@')[0],
-          );
-          this.logger.verbose(`Participant profile picture URL: ${JSON.stringify(picture_url)}`);
-
-          const findParticipant = await this.findContact(instance, participantJid.split('@')[0]);
-
-          if (findParticipant) {
-            this.logger.verbose(
-              `Found participant: ID:${findParticipant.id} - Name: ${findParticipant.name} - identifier: ${findParticipant.identifier}`,
-            );
-            if (!findParticipant.name || findParticipant.name === chatId) {
-              await this.updateContact(instance, findParticipant.id, {
-                name: body.pushName,
-                avatar_url: picture_url.profilePictureUrl || null,
-              });
-            }
+          // groupMetadata só está disponível no Baileys (client não existe na Cloud API)
+          if (waInstance?.integration !== Integration.WHATSAPP_BAILEYS || !waInstance?.client) {
+            this.logger.warn('Group metadata not available for this integration type');
+            // Para Cloud API, usar o remoteJid como nome do grupo
+            nameContact = `${remoteJid.split('@')[0]} (GROUP)`;
           } else {
-            await this.createContact(
-              instance,
-              participantJid.split('@')[0].split(':')[0],
-              filterInbox.id,
-              false,
-              body.pushName,
-              picture_url.profilePictureUrl || null,
-              participantJid,
+            const group = await waInstance.client.groupMetadata(chatId);
+            this.logger.verbose(`Group metadata: JID:${group.JID} - Subject:${group?.subject || group?.Name}`);
+
+            const participantJid = isLid && !body.key.fromMe ? body.key.participantAlt : body.key.participant;
+            nameContact = `${group.subject} (GROUP)`;
+
+            const picture_url = await this.waMonitor.waInstances[instance.instanceName].profilePicture(
+              participantJid.split('@')[0],
             );
+            this.logger.verbose(`Participant profile picture URL: ${JSON.stringify(picture_url)}`);
+
+            const findParticipant = await this.findContact(instance, participantJid.split('@')[0]);
+
+            if (findParticipant) {
+              this.logger.verbose(
+                `Found participant: ID:${findParticipant.id} - Name: ${findParticipant.name} - identifier: ${findParticipant.identifier}`,
+              );
+              if (!findParticipant.name || findParticipant.name === chatId) {
+                await this.updateContact(instance, findParticipant.id, {
+                  name: body.pushName,
+                  avatar_url: picture_url.profilePictureUrl || null,
+                });
+              }
+            } else {
+              await this.createContact(
+                instance,
+                participantJid.split('@')[0].split(':')[0],
+                filterInbox.id,
+                false,
+                body.pushName,
+                picture_url.profilePictureUrl || null,
+                participantJid,
+              );
+            }
           }
         }
 
@@ -1301,6 +1305,11 @@ export class ChatwootService {
     );
   }
 
+  private isMethodNotAvailableError(error: any): boolean {
+    const errorStr = this.extractErrorMessage(error);
+    return errorStr.includes('Method not available');
+  }
+
   public async onSendMessageError(instance: InstanceDto, conversation: number, error?: any) {
     this.logger.verbose(`onSendMessageError ${JSON.stringify(error)}`);
 
@@ -1316,15 +1325,21 @@ export class ChatwootService {
     if (error && error?.status === 400 && error?.message[0]?.exists === false) {
       content = i18next.t('cw.message.numbernotinwhatsapp');
     }
-    // 2. Instância desconectada
+    // 2. Método não disponível na integração (Cloud API)
+    else if (this.isMethodNotAvailableError(error)) {
+      this.logger.warn(`Method not available for this integration: ${this.extractErrorMessage(error)}`);
+      // Não exibir mensagem para o usuário, apenas logar o warning
+      return;
+    }
+    // 3. Instância desconectada
     else if (this.isInstanceDisconnectedError(error)) {
       content = i18next.t('cw.message.instancedisconnected');
     }
-    // 3. Instância não encontrada
+    // 4. Instância não encontrada
     else if (error === 'Instance not found' || error?.message === 'Instance not found') {
       content = i18next.t('cw.message.instancenotfound');
     }
-    // 4. Erro genérico (melhorado)
+    // 5. Erro genérico (melhorado)
     else {
       const errorMsg = this.extractErrorMessage(error);
       content = i18next.t('cw.message.notsent', {
@@ -1398,7 +1413,12 @@ export class ChatwootService {
         if (message) {
           const key = message.key as WAMessageKey;
 
-          await waInstance?.client.sendMessage(key.remoteJid, { delete: key });
+          // Deletar mensagem só está disponível no Baileys (client não existe na Cloud API)
+          if (waInstance?.integration === Integration.WHATSAPP_BAILEYS && waInstance?.client) {
+            await waInstance.client.sendMessage(key.remoteJid, { delete: key });
+          } else {
+            this.logger.warn('Delete message not available for this integration type');
+          }
 
           await this.prismaRepository.message.deleteMany({
             where: {
@@ -1475,8 +1495,14 @@ export class ChatwootService {
 
           await this.createBotMessage(instance, msgLogout, 'incoming');
 
-          await waInstance?.client?.logout('Log out instance: ' + instance.instanceName);
-          await waInstance?.client?.ws?.close();
+          // Logout só está disponível no Baileys (client não existe na Cloud API)
+          if (waInstance?.integration === Integration.WHATSAPP_BAILEYS && waInstance?.client) {
+            await waInstance.client.logout('Log out instance: ' + instance.instanceName);
+            await waInstance.client.ws?.close();
+          } else {
+            // Para Cloud API, usar o método logoutInstance
+            await waInstance?.logoutInstance();
+          }
         }
       }
 
@@ -1609,15 +1635,21 @@ export class ChatwootService {
           if (lastMessage && !lastMessage.chatwootIsRead) {
             const key = lastMessage.key as WAMessageKey;
 
-            waInstance?.markMessageAsRead({
-              readMessages: [
-                {
-                  id: key.id,
-                  fromMe: key.fromMe,
-                  remoteJid: key.remoteJid,
-                },
-              ],
-            });
+            // markMessageAsRead só está disponível no Baileys
+            if (waInstance?.integration === Integration.WHATSAPP_BAILEYS) {
+              waInstance
+                .markMessageAsRead({
+                  readMessages: [
+                    {
+                      id: key.id,
+                      fromMe: key.fromMe,
+                      remoteJid: key.remoteJid,
+                    },
+                  ],
+                })
+                .catch((err) => this.logger.warn(`Falha ao marcar mensagem como lida: ${err.message}`));
+            }
+
             const updateMessage = {
               chatwootMessageId: lastMessage.chatwootMessageId,
               chatwootConversationId: lastMessage.chatwootConversationId,
