@@ -1321,11 +1321,11 @@ export class ChatwootService {
     // Regex para detectar URLs
     const urlRegex = /https?:\/\/[^\s<>"{}|\\^`[\]]+/gi;
 
-    // 1. Extrair e preservar URLs com placeholders
+    // 1. Extrair e preservar URLs com placeholders (sem underscore/asterisco/til para não ser afetado pela formatação)
     const urls: string[] = [];
     const textWithPlaceholders = text.replace(urlRegex, (url) => {
       urls.push(url);
-      return `__URL_PLACEHOLDER_${urls.length - 1}__`;
+      return `<<<URLPLACEHOLDER${urls.length - 1}>>>`;
     });
 
     // 2. Aplicar formatação de markdown (WhatsApp -> Chatwoot)
@@ -1335,7 +1335,7 @@ export class ChatwootService {
       .replace(/~((?!\s)([^\n~]+?)(?<!\s))~/g, '~~$1~~'); // Strikethrough: ~ -> ~~
 
     // 3. Restaurar URLs originais
-    return formattedText.replace(/__URL_PLACEHOLDER_(\d+)__/g, (_, index) => urls[parseInt(index)]);
+    return formattedText.replace(/<<<URLPLACEHOLDER(\d+)>>>/g, (_, index) => urls[parseInt(index)]);
   }
 
   public async onSendMessageError(instance: InstanceDto, conversation: number, error?: any) {
