@@ -1310,6 +1310,34 @@ export class ChatwootService {
     return errorStr.includes('Method not available');
   }
 
+  /**
+   * Converte formatação WhatsApp para Markdown do Chatwoot, preservando URLs
+   * WhatsApp: *bold* _italic_ ~strikethrough~
+   * Chatwoot: **bold** *italic* ~~strikethrough~~
+   */
+  private convertWhatsAppToMarkdown(text: string): string {
+    if (!text) return text;
+
+    // Regex para detectar URLs
+    const urlRegex = /https?:\/\/[^\s<>"{}|\\^`[\]]+/gi;
+
+    // 1. Extrair e preservar URLs com placeholders
+    const urls: string[] = [];
+    const textWithPlaceholders = text.replace(urlRegex, (url) => {
+      urls.push(url);
+      return `__URL_PLACEHOLDER_${urls.length - 1}__`;
+    });
+
+    // 2. Aplicar formatação de markdown (WhatsApp -> Chatwoot)
+    const formattedText = textWithPlaceholders
+      .replace(/\*((?!\s)([^\n*]+?)(?<!\s))\*/g, '**$1**') // Bold: * -> **
+      .replace(/_((?!\s)([^\n_]+?)(?<!\s))_/g, '*$1*') // Italic: _ -> *
+      .replace(/~((?!\s)([^\n~]+?)(?<!\s))~/g, '~~$1~~'); // Strikethrough: ~ -> ~~
+
+    // 3. Restaurar URLs originais
+    return formattedText.replace(/__URL_PLACEHOLDER_(\d+)__/g, (_, index) => urls[parseInt(index)]);
+  }
+
   public async onSendMessageError(instance: InstanceDto, conversation: number, error?: any) {
     this.logger.verbose(`onSendMessageError ${JSON.stringify(error)}`);
 
@@ -2092,12 +2120,7 @@ export class ChatwootService {
         }
 
         const originalMessage = await this.getConversationMessage(body.message);
-        const bodyMessage = originalMessage
-          ? originalMessage
-              .replaceAll(/\*((?!\s)([^\n*]+?)(?<!\s))\*/g, '**$1**')
-              .replaceAll(/_((?!\s)([^\n_]+?)(?<!\s))_/g, '*$1*')
-              .replaceAll(/~((?!\s)([^\n~]+?)(?<!\s))~/g, '~~$1~~')
-          : originalMessage;
+        const bodyMessage = this.convertWhatsAppToMarkdown(originalMessage);
 
         if (bodyMessage && bodyMessage.includes('/survey/responses/') && bodyMessage.includes('http')) {
           return;
