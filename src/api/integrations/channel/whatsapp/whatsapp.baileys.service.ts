@@ -463,17 +463,27 @@ export class BaileysStartupService extends ChannelStartupService {
           return;
         }
 
-        this.logger.warn(
-          `[${this.instanceName}] Connection lost (statusCode: ${statusCode}), reconnecting... (attempt ${this.reconnectAttempts}/${this.MAX_RECONNECT_ATTEMPTS})`,
-        );
-
         // Sincroniza banco para 'connecting' antes de reconectar
         await this.prismaRepository.instance.update({
           where: { id: this.instanceId },
           data: { connectionStatus: 'connecting' },
         });
 
-        await this.connectToWhatsapp(this.phoneNumber);
+        // Modelo híbrido: tentativas 1-3 reconexão simples, 4-5 reinicialização completa
+        if (this.reconnectAttempts <= 3) {
+          this.logger.warn(
+            `[${this.instanceName}] Connection lost (statusCode: ${statusCode}), simple reconnect... (attempt ${this.reconnectAttempts}/${this.MAX_RECONNECT_ATTEMPTS})`,
+          );
+          await this.connectToWhatsapp(this.phoneNumber);
+        } else {
+          this.logger.warn(
+            `[${this.instanceName}] Connection lost (statusCode: ${statusCode}), full restart... (attempt ${this.reconnectAttempts}/${this.MAX_RECONNECT_ATTEMPTS})`,
+          );
+          // Reinicialização completa: fecha WebSocket e cliente antes de reconectar
+          this.client?.ws?.close();
+          this.client?.end(new Error('auto-reconnect-full-restart'));
+          await this.connectToWhatsapp(this.phoneNumber);
+        }
       } else {
         this.sendDataWebhook(Events.STATUS_INSTANCE, {
           instance: this.instance.name,
