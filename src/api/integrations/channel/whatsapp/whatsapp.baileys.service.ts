@@ -255,6 +255,10 @@ export class BaileysStartupService extends ChannelStartupService {
 
   public stateConnection: wa.StateConnection = { state: 'close' };
 
+  // Reconnection control
+  private reconnectAttempts = 0;
+  private readonly MAX_RECONNECT_ATTEMPTS = 5;
+
   public phoneNumber: string;
 
   public get connectionStatus() {
@@ -422,9 +426,53 @@ export class BaileysStartupService extends ChannelStartupService {
 
     if (connection === 'close') {
       const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
+
+      // Correção PR #2365: Previne loop infinito durante geração de QR code
+      const isInitialConnection = !this.instance.wuid && this.instance.qrcode?.count === 0;
+      if (isInitialConnection) {
+        this.logger.info(`[${this.instanceName}] Initial connection closed, waiting for QR code generation...`);
+        return;
+      }
+
       const codesToNotReconnect = [DisconnectReason.loggedOut, DisconnectReason.forbidden, 402, 406];
       const shouldReconnect = !codesToNotReconnect.includes(statusCode);
+
       if (shouldReconnect) {
+        this.reconnectAttempts++;
+
+        if (this.reconnectAttempts > this.MAX_RECONNECT_ATTEMPTS) {
+          this.logger.error(
+            `[${this.instanceName}] Max reconnection attempts (${this.MAX_RECONNECT_ATTEMPTS}) reached. Marking as disconnected.`,
+          );
+          await this.prismaRepository.instance.update({
+            where: { id: this.instanceId },
+            data: {
+              connectionStatus: 'close',
+              disconnectionAt: new Date(),
+              disconnectionReasonCode: statusCode,
+              disconnectionObject: JSON.stringify(lastDisconnect),
+            },
+          });
+          this.sendDataWebhook(Events.STATUS_INSTANCE, {
+            instance: this.instance.name,
+            status: 'closed',
+            disconnectionAt: new Date(),
+            disconnectionReasonCode: statusCode,
+            disconnectionObject: JSON.stringify(lastDisconnect),
+          });
+          return;
+        }
+
+        this.logger.warn(
+          `[${this.instanceName}] Connection lost (statusCode: ${statusCode}), reconnecting... (attempt ${this.reconnectAttempts}/${this.MAX_RECONNECT_ATTEMPTS})`,
+        );
+
+        // Sincroniza banco para 'connecting' antes de reconectar
+        await this.prismaRepository.instance.update({
+          where: { id: this.instanceId },
+          data: { connectionStatus: 'connecting' },
+        });
+
         await this.connectToWhatsapp(this.phoneNumber);
       } else {
         this.sendDataWebhook(Events.STATUS_INSTANCE, {
@@ -484,6 +532,9 @@ export class BaileysStartupService extends ChannelStartupService {
       `,
       );
 
+      // Reset reconnect attempts on successful connection
+      this.reconnectAttempts = 0;
+
       await this.prismaRepository.instance.update({
         where: { id: this.instanceId },
         data: {
@@ -528,6 +579,12 @@ export class BaileysStartupService extends ChannelStartupService {
     }
 
     if (connection === 'connecting') {
+      // Sincroniza banco para 'connecting' quando estado muda
+      await this.prismaRepository.instance.update({
+        where: { id: this.instanceId },
+        data: { connectionStatus: 'connecting' },
+      });
+
       this.sendDataWebhook(Events.CONNECTION_UPDATE, { instance: this.instance.name, ...this.stateConnection });
     }
   }
