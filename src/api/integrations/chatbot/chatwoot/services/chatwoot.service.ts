@@ -2771,8 +2771,12 @@ export class ChatwootService {
 
       131053:
         '⚠️ Mensagem não entregue\n\n' +
-        '**Motivo:** Erro ao fazer upload da mídia.\n' +
-        'Verifique se o arquivo está em um formato suportado.\n\n' +
+        '**Motivo:** Arquivo muito grande ou formato não suportado.\n\n' +
+        '**Limites da API do WhatsApp:**\n' +
+        '• Vídeo: máx. 16 MB\n' +
+        '• Áudio: máx. 16 MB\n' +
+        '• Imagem: máx. 5 MB\n' +
+        '• Documento: máx. 100 MB\n\n' +
         '**Código:** 131053',
     };
 
