@@ -41,6 +41,15 @@ interface ChatwootMessage {
   isRead?: boolean;
 }
 
+// Limites de tamanho de mídia da WhatsApp Cloud API (em bytes)
+const CLOUD_API_MEDIA_LIMITS: Record<string, number> = {
+  video: 16 * 1024 * 1024, // 16 MB
+  audio: 16 * 1024 * 1024, // 16 MB
+  image: 5 * 1024 * 1024, // 5 MB
+  document: 100 * 1024 * 1024, // 100 MB
+  sticker: 500 * 1024, // 500 KB
+};
+
 export class ChatwootService {
   private readonly logger = new Logger('ChatwootService');
 
@@ -1199,6 +1208,43 @@ export class ChatwootService {
     }
   }
 
+  private async getFileSizeFromUrl(url: string): Promise<number | null> {
+    try {
+      const response = await axios.head(url, { timeout: 10000 });
+      const contentLength = response.headers['content-length'];
+      if (contentLength) {
+        return parseInt(contentLength, 10);
+      }
+
+      const getResponse = await axios.get(url, {
+        responseType: 'arraybuffer',
+        timeout: 30000,
+      });
+      return getResponse.data.byteLength;
+    } catch (error) {
+      this.logger.warn(`[Chatwoot] Não foi possível obter tamanho do arquivo: ${error.message}`);
+      return null;
+    }
+  }
+
+  private formatBytes(bytes: number): string {
+    if (bytes < 1024) return `${bytes} bytes`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  }
+
+  private validateMediaSizeForCloudApi(
+    type: string,
+    fileSize: number,
+  ): { valid: boolean; maxSize: number; currentSize: number } {
+    const maxSize = CLOUD_API_MEDIA_LIMITS[type] || CLOUD_API_MEDIA_LIMITS.document;
+    return {
+      valid: fileSize <= maxSize,
+      maxSize,
+      currentSize: fileSize,
+    };
+  }
+
   public async sendAttachment(waInstance: any, number: string, media: any, caption?: string, options?: Options) {
     try {
       const parsedMedia = path.parse(decodeURIComponent(media));
@@ -1230,6 +1276,22 @@ export class ChatwootService {
         default:
           type = 'document';
           break;
+      }
+
+      // Validar tamanho do arquivo para Cloud API
+      if (waInstance?.integration === Integration.WHATSAPP_BUSINESS) {
+        const fileSize = await this.getFileSizeFromUrl(media);
+        if (fileSize) {
+          const validation = this.validateMediaSizeForCloudApi(type, fileSize);
+          if (!validation.valid) {
+            const errorMessage =
+              `Arquivo muito grande para envio via WhatsApp Cloud API. ` +
+              `Tamanho: ${this.formatBytes(validation.currentSize)}, ` +
+              `Limite para ${type}: ${this.formatBytes(validation.maxSize)}`;
+            this.logger.warn(`[Chatwoot] ${errorMessage}`);
+            throw new Error(errorMessage);
+          }
+        }
       }
 
       if (type === 'audio') {
