@@ -2713,6 +2713,71 @@ export class ChatwootService {
     }
   }
 
+  private formatBytesForError(bytes: number): string {
+    if (bytes < 1024) return `${bytes} bytes`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  }
+
+  private build131053ErrorMessage(details?: string): string {
+    // Erro de tamanho - padrão: "has size X bytes but must be atmost Y bytes"
+    if (details && details.includes('bytes') && details.includes('atmost')) {
+      const sizeMatch = details.match(/has size (\d+) bytes.*atmost (\d+) bytes/i);
+      if (sizeMatch) {
+        const currentSize = this.formatBytesForError(parseInt(sizeMatch[1]));
+        const maxSize = this.formatBytesForError(parseInt(sizeMatch[2]));
+
+        // Detectar tipo de mídia
+        let mediaType = 'arquivo';
+        if (details.toLowerCase().includes('video')) mediaType = 'vídeo';
+        else if (details.toLowerCase().includes('image')) mediaType = 'imagem';
+        else if (details.toLowerCase().includes('audio')) mediaType = 'áudio';
+        else if (details.toLowerCase().includes('document')) mediaType = 'documento';
+
+        return (
+          '⚠️ Arquivo muito grande\n\n' +
+          `**Tipo:** ${mediaType.charAt(0).toUpperCase() + mediaType.slice(1)}\n` +
+          `**Tamanho enviado:** ${currentSize}\n` +
+          `**Limite máximo:** ${maxSize}\n\n` +
+          '_Reduza o tamanho do arquivo antes de enviar._\n\n' +
+          '**Código:** 131053'
+        );
+      }
+    }
+
+    // Erro de formato não suportado
+    if (
+      details &&
+      (details.includes('unsupported') || details.includes('invalid') || details.includes('not supported'))
+    ) {
+      return (
+        '⚠️ Formato de arquivo não suportado\n\n' +
+        '**Motivo:** O formato do arquivo não é aceito pela API do WhatsApp.\n\n' +
+        '**Formatos suportados:**\n' +
+        '• Imagem: JPG, PNG\n' +
+        '• Vídeo: MP4, 3GP\n' +
+        '• Áudio: MP3, OGG, AAC, AMR\n' +
+        '• Documento: PDF, DOC, XLS, PPT, TXT\n\n' +
+        '**Código:** 131053'
+      );
+    }
+
+    // Mensagem genérica para outros casos do 131053
+    return (
+      '⚠️ Mensagem não entregue\n\n' +
+      '**Motivo:** Erro no upload da mídia.\n\n' +
+      '**Possíveis causas:**\n' +
+      '• Arquivo muito grande\n' +
+      '• Formato não suportado\n\n' +
+      '**Limites da API do WhatsApp:**\n' +
+      '• Vídeo: máx. 16 MB\n' +
+      '• Áudio: máx. 16 MB\n' +
+      '• Imagem: máx. 5 MB\n' +
+      '• Documento: máx. 100 MB\n\n' +
+      '**Código:** 131053'
+    );
+  }
+
   private buildFailedMessageNotification(error?: {
     code?: number;
     title?: string;
@@ -2769,16 +2834,13 @@ export class ChatwootService {
         'O arquivo pode estar corrompido ou inacessível.\n\n' +
         '**Código:** 131052',
 
-      131053:
-        '⚠️ Mensagem não entregue\n\n' +
-        '**Motivo:** Arquivo muito grande ou formato não suportado.\n\n' +
-        '**Limites da API do WhatsApp:**\n' +
-        '• Vídeo: máx. 16 MB\n' +
-        '• Áudio: máx. 16 MB\n' +
-        '• Imagem: máx. 5 MB\n' +
-        '• Documento: máx. 100 MB\n\n' +
-        '**Código:** 131053',
+      131053: null, // Tratado dinamicamente abaixo
     };
+
+    // Tratamento especial para erro 131053 - analisar details para mensagem específica
+    if (error.code === 131053) {
+      return this.build131053ErrorMessage(error.details);
+    }
 
     if (errorMessages[error.code]) {
       return errorMessages[error.code];
