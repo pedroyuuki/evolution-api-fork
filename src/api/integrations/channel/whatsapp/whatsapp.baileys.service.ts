@@ -1590,6 +1590,21 @@ export class BaileysStartupService extends ChannelStartupService {
             messageRaw.key.remoteJidAlt = originalLid;
           }
 
+          // Normaliza LID para PN em grupos: faz TROCA entre participant e participantAlt
+          // quando participant é LID e participantAlt é um número de telefone válido
+          if (
+            messageRaw.key.participant?.includes('@lid') &&
+            messageRaw.key.participantAlt &&
+            messageRaw.key.participantAlt.includes('@s.whatsapp.net')
+          ) {
+            const originalParticipantLid = messageRaw.key.participant;
+            const participantPhone = messageRaw.key.participantAlt;
+
+            // TROCA: PN vai pro principal, LID vai pro alternativo
+            messageRaw.key.participant = participantPhone;
+            messageRaw.key.participantAlt = originalParticipantLid;
+          }
+
           this.sendDataWebhook(Events.MESSAGES_UPSERT, messageRaw);
 
           await chatbotController.emit({

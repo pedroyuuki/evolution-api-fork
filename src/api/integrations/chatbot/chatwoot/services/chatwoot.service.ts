@@ -638,7 +638,6 @@ export class ChatwootService {
   }
 
   public async createConversation(instance: InstanceDto, body: any) {
-    const isLid = body.key.addressingMode === 'lid';
     const isGroup = body.key.remoteJid.endsWith('@g.us');
     // Após TROCA no messages.upsert: remoteJid sempre é PN, remoteJidAlt é LID
     const phoneNumber = body.key.remoteJid;
@@ -750,7 +749,8 @@ export class ChatwootService {
             const group = await waInstance.client.groupMetadata(chatId);
             this.logger.verbose(`Group metadata: JID:${group.JID} - Subject:${group?.subject || group?.Name}`);
 
-            const participantJid = isLid && !body.key.fromMe ? body.key.participantAlt : body.key.participant;
+            // Após TROCA no messages.upsert: participant já é PN
+            const participantJid = body.key.participant;
             nameContact = `${group.subject} (GROUP)`;
 
             const picture_url = await this.waMonitor.waInstances[instance.instanceName].profilePicture(
@@ -2258,10 +2258,8 @@ export class ChatwootService {
 
           if (body.key.remoteJid.includes('@g.us')) {
             const participantName = body.pushName;
-            const rawPhoneNumber =
-              body.key.addressingMode === 'lid' && !body.key.fromMe && body.key.participantAlt
-                ? body.key.participantAlt.split('@')[0].split(':')[0]
-                : body.key.participant.split('@')[0].split(':')[0];
+            // Após TROCA no messages.upsert: participant já é PN
+            const rawPhoneNumber = body.key.participant.split('@')[0].split(':')[0];
             const parsedPhone = parsePhoneNumberFromString(`+${rawPhoneNumber}`);
             const formattedPhoneNumber = parsedPhone?.formatInternational() ?? rawPhoneNumber;
 
@@ -2441,10 +2439,8 @@ export class ChatwootService {
 
         if (body.key.remoteJid.includes('@g.us')) {
           const participantName = body.pushName;
-          const rawPhoneNumber =
-            body.key.addressingMode === 'lid' && !body.key.fromMe && body.key.participantAlt
-              ? body.key.participantAlt.split('@')[0].split(':')[0]
-              : body.key.participant.split('@')[0].split(':')[0];
+          // Após TROCA no messages.upsert: participant já é PN
+          const rawPhoneNumber = body.key.participant.split('@')[0].split(':')[0];
           const parsedPhone = parsePhoneNumberFromString(`+${rawPhoneNumber}`);
           const formattedPhoneNumber = parsedPhone?.formatInternational() ?? rawPhoneNumber;
 
