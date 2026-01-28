@@ -1574,10 +1574,21 @@ export class BaileysStartupService extends ChannelStartupService {
           this.logger.verbose(messageRaw);
 
           sendTelemetry(`received.message.${messageRaw.messageType ?? 'unknown'}`);
-          if (messageRaw.key.remoteJid?.includes('@lid') && messageRaw.key.remoteJidAlt) {
-            messageRaw.key.remoteJid = messageRaw.key.remoteJidAlt;
+
+          // Normaliza LID para PN: faz TROCA entre remoteJid e remoteJidAlt
+          // quando remoteJid é LID e remoteJidAlt é um número de telefone válido
+          if (
+            messageRaw.key.remoteJid?.includes('@lid') &&
+            messageRaw.key.remoteJidAlt &&
+            messageRaw.key.remoteJidAlt.includes('@s.whatsapp.net')
+          ) {
+            const originalLid = messageRaw.key.remoteJid;
+            const phoneNumber = messageRaw.key.remoteJidAlt;
+
+            // TROCA: PN vai pro principal, LID vai pro alternativo
+            messageRaw.key.remoteJid = phoneNumber;
+            messageRaw.key.remoteJidAlt = originalLid;
           }
-          console.log(messageRaw);
 
           this.sendDataWebhook(Events.MESSAGES_UPSERT, messageRaw);
 
@@ -1609,10 +1620,11 @@ export class BaileysStartupService extends ChannelStartupService {
           }
 
           if (contactRaw.remoteJid.includes('@s.whatsapp') || contactRaw.remoteJid.includes('@lid')) {
+            // Após a TROCA: remoteJid = PN, remoteJidAlt = LID
+            // Salvamos o PN como principal e o LID como alternativo
             await saveOnWhatsappCache([
               {
-                remoteJid:
-                  messageRaw.key.addressingMode === 'lid' ? messageRaw.key.remoteJidAlt : messageRaw.key.remoteJid,
+                remoteJid: messageRaw.key.remoteJid,
                 remoteJidAlt: messageRaw.key.remoteJidAlt,
                 lid: messageRaw.key.addressingMode === 'lid' ? 'lid' : null,
               },
