@@ -9,7 +9,12 @@ import { SettingsService } from '@api/services/settings.service';
 import { Events, Integration, wa } from '@api/types/wa.types';
 import { Auth, Chatwoot, ConfigService, HttpServer, WaBusiness } from '@config/env.config';
 import { Logger } from '@config/logger.config';
-import { BadRequestException, InternalServerErrorException, UnauthorizedException } from '@exceptions';
+import {
+  BadRequestException,
+  InternalServerErrorException,
+  NotFoundException,
+  UnauthorizedException,
+} from '@exceptions';
 import { delay } from 'baileys';
 import { isArray, isURL } from 'class-validator';
 import EventEmitter2 from 'eventemitter2';
@@ -355,6 +360,26 @@ export class InstanceController {
       if (state === 'close') {
         throw new BadRequestException('The "' + instanceName + '" instance is not connected');
       }
+
+      // Detect stuck 'connecting' state without functional client
+      if (state === 'connecting') {
+        const integration = await instance.integration;
+
+        // For Baileys, check if client is active
+        if (integration === Integration.WHATSAPP_BAILEYS && !instance.client) {
+          this.logger.warn(`Instance ${instanceName} stuck in 'connecting' without client - forcing logout first`);
+
+          // Force logout via event to clean state
+          this.eventEmitter.emit('logout.instance', instanceName);
+
+          // Wait for cleanup to complete
+          await new Promise((r) => setTimeout(r, 1000));
+
+          // Now can reconnect clean
+          return await this.connectToWhatsapp({ instanceName });
+        }
+      }
+
       this.logger.info(`Restarting instance: ${instanceName}`);
 
       if (typeof instance.restart === 'function') {
@@ -435,16 +460,47 @@ export class InstanceController {
 
   public async logout({ instanceName }: InstanceDto) {
     const { instance } = await this.connectionState({ instanceName });
+    const waInstance = this.waMonitor.waInstances[instanceName];
+
+    if (!waInstance) {
+      throw new NotFoundException(`Instance ${instanceName} not found in memory`);
+    }
 
     if (instance.state === 'close') {
       throw new BadRequestException('The "' + instanceName + '" instance is not connected');
     }
 
-    try {
-      await this.waMonitor.waInstances[instanceName]?.logoutInstance();
+    // Validate integration before logout
+    const integration = await waInstance.integration;
 
+    try {
+      // Baileys has client.logout, Meta/Evolution only have logoutInstance
+      if (integration === Integration.WHATSAPP_BAILEYS) {
+        if (!waInstance.client) {
+          // Baileys in 'connecting' but no client = inconsistent state
+          this.logger.warn(`Instance ${instanceName} is in ${instance.state} but has no client - forcing cleanup`);
+          this.eventEmitter.emit('logout.instance', instanceName);
+          return {
+            status: 'SUCCESS',
+            error: false,
+            response: { message: 'Instance force logged out' },
+          };
+        }
+      }
+
+      await waInstance.logoutInstance();
       return { status: 'SUCCESS', error: false, response: { message: 'Instance logged out' } };
     } catch (error) {
+      this.logger.error({
+        local: 'logout',
+        instanceName,
+        integration,
+        state: instance.state,
+        error: error.message,
+      });
+
+      // If logout fails, try forced cleanup via event
+      this.eventEmitter.emit('logout.instance', instanceName);
       throw new InternalServerErrorException(error.toString());
     }
   }

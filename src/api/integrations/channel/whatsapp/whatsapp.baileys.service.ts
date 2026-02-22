@@ -267,6 +267,10 @@ export class BaileysStartupService extends ChannelStartupService {
 
   public async logoutInstance() {
     this.messageProcessor.onDestroy();
+
+    // Reset reconnect counter on logout
+    this.reconnectAttempts = 0;
+
     await this.client?.logout('Log out instance: ' + this.instanceName);
 
     this.client?.ws?.close();
@@ -474,15 +478,69 @@ export class BaileysStartupService extends ChannelStartupService {
           this.logger.warn(
             `[${this.instanceName}] Connection lost (statusCode: ${statusCode}), simple reconnect... (attempt ${this.reconnectAttempts}/${this.MAX_RECONNECT_ATTEMPTS})`,
           );
-          await this.connectToWhatsapp(this.phoneNumber);
+
+          try {
+            await this.connectToWhatsapp(this.phoneNumber);
+          } catch (error) {
+            this.logger.error({
+              local: 'connectionUpdate.reconnect',
+              message: `Reconnection attempt ${this.reconnectAttempts} failed`,
+              error: error?.message,
+              instanceName: this.instanceName,
+            });
+
+            // Se falhar e atingiu max tentativas, força estado 'close'
+            if (this.reconnectAttempts >= this.MAX_RECONNECT_ATTEMPTS) {
+              await this.prismaRepository.instance.update({
+                where: { id: this.instanceId },
+                data: {
+                  connectionStatus: 'close',
+                  disconnectionAt: new Date(),
+                  disconnectionReasonCode: statusCode,
+                },
+              });
+              this.stateConnection.state = 'close';
+              this.sendDataWebhook(Events.STATUS_INSTANCE, {
+                instance: this.instance.name,
+                status: 'closed',
+                reason: 'max_reconnect_attempts_reached',
+              });
+            }
+          }
         } else {
           this.logger.warn(
             `[${this.instanceName}] Connection lost (statusCode: ${statusCode}), full restart... (attempt ${this.reconnectAttempts}/${this.MAX_RECONNECT_ATTEMPTS})`,
           );
-          // Reinicialização completa: fecha WebSocket e cliente antes de reconectar
-          this.client?.ws?.close();
-          this.client?.end(new Error('auto-reconnect-full-restart'));
-          await this.connectToWhatsapp(this.phoneNumber);
+
+          try {
+            // Reinicialização completa: fecha WebSocket e cliente antes de reconectar
+            this.client?.ws?.close();
+            this.client?.end(new Error('auto-reconnect-full-restart'));
+            await this.connectToWhatsapp(this.phoneNumber);
+          } catch (error) {
+            this.logger.error({
+              local: 'connectionUpdate.fullRestart',
+              message: `Full restart attempt ${this.reconnectAttempts} failed`,
+              error: error?.message,
+              instanceName: this.instanceName,
+            });
+
+            // Após max tentativas, força estado 'close'
+            await this.prismaRepository.instance.update({
+              where: { id: this.instanceId },
+              data: {
+                connectionStatus: 'close',
+                disconnectionAt: new Date(),
+                disconnectionReasonCode: statusCode,
+              },
+            });
+            this.stateConnection.state = 'close';
+            this.sendDataWebhook(Events.STATUS_INSTANCE, {
+              instance: this.instance.name,
+              status: 'closed',
+              reason: 'max_reconnect_attempts_reached',
+            });
+          }
         }
       } else {
         this.sendDataWebhook(Events.STATUS_INSTANCE, {
