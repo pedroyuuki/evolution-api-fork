@@ -390,7 +390,7 @@ export class BusinessStartupService extends ChannelStartupService {
       let messageRaw: any;
       let pushName: any;
 
-      if (received.contacts) pushName = received.contacts[0].profile.name;
+      if (received.contacts) pushName = received.contacts[0]?.profile?.name;
 
       if (received.messages) {
         const message = received.messages[0]; // Añadir esta línea para definir message
@@ -705,7 +705,7 @@ export class BusinessStartupService extends ChannelStartupService {
         });
 
         const contactRaw: any = {
-          remoteJid: received.contacts[0].profile.phone,
+          remoteJid: received.contacts[0]?.profile?.phone,
           pushName,
           // profilePicUrl: '',
           instanceId: this.instanceId,
@@ -717,7 +717,7 @@ export class BusinessStartupService extends ChannelStartupService {
 
         if (contact) {
           const contactRaw: any = {
-            remoteJid: received.contacts[0].profile.phone,
+            remoteJid: received.contacts[0]?.profile?.phone,
             pushName,
             // profilePicUrl: '',
             instanceId: this.instanceId,
