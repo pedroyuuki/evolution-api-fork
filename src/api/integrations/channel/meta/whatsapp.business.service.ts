@@ -1189,6 +1189,10 @@ export class BusinessStartupService extends ChannelStartupService {
 
       this.logger.log(messageRaw);
 
+      await this.prismaRepository.message.create({
+        data: messageRaw,
+      });
+
       this.sendDataWebhook(Events.SEND_MESSAGE, messageRaw);
 
       if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED && this.localChatwoot?.enabled && !isIntegration) {
@@ -1206,10 +1210,6 @@ export class BusinessStartupService extends ChannelStartupService {
           msg: messageRaw,
           pushName: messageRaw.pushName,
         });
-
-      await this.prismaRepository.message.create({
-        data: messageRaw,
-      });
 
       return messageRaw;
     } catch (error) {
