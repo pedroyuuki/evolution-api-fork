@@ -1,0 +1,11 @@
+# Override TEMPORÁRIO de QA: aponta o host do WhatsApp para o loopback, forçando o
+# socket a falhar antes de chegar em 'open'. É o único jeito determinístico de
+# exercitar o guard isInitialConnection numa sessão já pareada.
+#
+#   docker compose -f docker-compose.local.yaml -f docker-compose.blackhole.yaml up -d
+#   (depois subir de novo só com o local.yaml para restaurar)
+services:
+  api:
+    extra_hosts:
+      - 'web.whatsapp.com:127.0.0.1'
+      - 'g.whatsapp.net:127.0.0.1'
