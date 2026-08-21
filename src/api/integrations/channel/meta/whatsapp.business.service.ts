@@ -22,18 +22,16 @@ import { ChannelStartupService } from '@api/services/channel.service';
 import { Events, wa } from '@api/types/wa.types';
 import { AudioConverter, Chatwoot, ConfigService, Database, Openai, S3, WaBusiness } from '@config/env.config';
 import { BadRequestException, InternalServerErrorException } from '@exceptions';
-import ffmpegPath from '@ffmpeg-installer/ffmpeg';
+import { convertAudioToMp3 as convertToMp3 } from '@utils/convertAudioToMp3';
 import { createJid } from '@utils/createJid';
 import { status } from '@utils/renderStatus';
 import { sendTelemetry } from '@utils/sendTelemetry';
 import axios from 'axios';
 import { arrayUnique, isURL } from 'class-validator';
 import EventEmitter2 from 'eventemitter2';
-import ffmpeg from 'fluent-ffmpeg';
 import FormData from 'form-data';
 import mimeTypes from 'mime-types';
 import { join } from 'path';
-import { PassThrough } from 'stream';
 
 export class BusinessStartupService extends ChannelStartupService {
   constructor(
@@ -1391,81 +1389,14 @@ export class BusinessStartupService extends ChannelStartupService {
   }
 
   private async convertAudioToMp3(audioInput: string | Buffer): Promise<Buffer> {
-    return new Promise((resolve, reject) => {
-      let inputStream: PassThrough;
-
-      if (Buffer.isBuffer(audioInput)) {
-        inputStream = new PassThrough();
-        inputStream.end(audioInput);
-      } else if (typeof audioInput === 'string') {
-        inputStream = new PassThrough();
-        const buffer = Buffer.from(audioInput, 'base64');
-        inputStream.end(buffer);
-      } else {
-        reject(new Error('Invalid audio input type'));
-        return;
-      }
-
-      const outputStream = new PassThrough();
-      const chunks: Buffer[] = [];
-
-      outputStream.on('data', (chunk) => chunks.push(chunk));
-      outputStream.on('end', () => {
-        const outputBuffer = Buffer.concat(chunks);
-        this.logger.verbose(`[Cloud API] Audio convertido para MP3 - ${outputBuffer.length} bytes`);
-        resolve(outputBuffer);
-      });
-      outputStream.on('error', (error) => {
-        this.logger.error(`[Cloud API] Erro no stream de saída: ${error.message}`);
-        reject(error);
-      });
-
-      ffmpeg.setFfmpegPath(ffmpegPath.path);
-
-      ffmpeg(inputStream)
-        .inputFormat('ogg')
-        .outputFormat('mp3')
-        .noVideo()
-        .audioCodec('libmp3lame')
-        .audioBitrate('128k')
-        .audioFrequency(44100)
-        .audioChannels(2)
-        .on('error', (error) => {
-          this.logger.warn(`[Cloud API] Tentando conversão sem inputFormat: ${error.message}`);
-
-          const retryInputStream = new PassThrough();
-          if (Buffer.isBuffer(audioInput)) {
-            retryInputStream.end(audioInput);
-          } else {
-            retryInputStream.end(Buffer.from(audioInput, 'base64'));
-          }
-
-          const retryOutputStream = new PassThrough();
-          const retryChunks: Buffer[] = [];
-
-          retryOutputStream.on('data', (chunk) => retryChunks.push(chunk));
-          retryOutputStream.on('end', () => {
-            const outputBuffer = Buffer.concat(retryChunks);
-            this.logger.verbose(`[Cloud API] Audio convertido para MP3 (retry) - ${outputBuffer.length} bytes`);
-            resolve(outputBuffer);
-          });
-          retryOutputStream.on('error', reject);
-
-          ffmpeg(retryInputStream)
-            .outputFormat('mp3')
-            .noVideo()
-            .audioCodec('libmp3lame')
-            .audioBitrate('128k')
-            .audioFrequency(44100)
-            .audioChannels(2)
-            .on('error', (retryError) => {
-              this.logger.error(`[Cloud API] Falha na conversão de áudio: ${retryError.message}`);
-              reject(retryError);
-            })
-            .pipe(retryOutputStream, { end: true });
-        })
-        .pipe(outputStream, { end: true });
-    });
+    try {
+      const outputBuffer = await convertToMp3(audioInput);
+      this.logger.verbose(`[Cloud API] Audio convertido para MP3 - ${outputBuffer.length} bytes`);
+      return outputBuffer;
+    } catch (error) {
+      this.logger.error(`[Cloud API] Falha na conversão de áudio: ${error?.message}`);
+      throw error;
+    }
   }
 
   private async convertAudioFromUrl(url: string): Promise<Buffer> {
