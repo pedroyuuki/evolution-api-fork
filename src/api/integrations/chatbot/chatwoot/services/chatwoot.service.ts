@@ -1641,17 +1641,21 @@ export class ChatwootService {
               };
 
               let messageSent: any;
+              let errorReported = false;
               try {
                 messageSent = await this.sendAttachment(waInstance, chatId, attachment.data_url, formatText, options);
               } catch (attachmentError) {
                 this.logger.error(
                   `Failed to send attachment to ${chatId}: ${this.extractErrorMessage(attachmentError)}`,
                 );
+                errorReported = true;
                 if (body.conversation?.id) {
                   this.onSendMessageError(instance, body.conversation?.id, attachmentError);
                 }
               }
-              if (!messageSent && body.conversation?.id) {
+              // Só reporta aqui quando o envio devolveu vazio sem lançar: o catch acima
+              // já avisou o atendente, e reportar de novo duplicaria a nota privada.
+              if (!messageSent && !errorReported && body.conversation?.id) {
                 this.onSendMessageError(instance, body.conversation?.id, 'Attachment not sent');
               }
 
@@ -2153,18 +2157,24 @@ export class ChatwootService {
           ignoreContacts = true;
         }
 
-        if (ignoreGroups && body?.key?.remoteJid.endsWith('@g.us')) {
-          this.logger.warn('Ignoring message from group: ' + body?.key?.remoteJid);
+        // messages.upsert traz o jid em key.remoteJid; o payload de messages.update
+        // (status FAILED) traz na raiz, sem key. Sem o optional chaining no endsWith,
+        // o segundo caso lançava um TypeError que era engolido pelo catch, derrubando
+        // a notificação de erro em silêncio.
+        const remoteJid: string | undefined = body?.key?.remoteJid ?? body?.remoteJid;
+
+        if (ignoreGroups && remoteJid?.endsWith('@g.us')) {
+          this.logger.warn('Ignoring message from group: ' + remoteJid);
           return;
         }
 
-        if (ignoreContacts && body?.key?.remoteJid.endsWith('@s.whatsapp.net')) {
-          this.logger.warn('Ignoring message from contact: ' + body?.key?.remoteJid);
+        if (ignoreContacts && remoteJid?.endsWith('@s.whatsapp.net')) {
+          this.logger.warn('Ignoring message from contact: ' + remoteJid);
           return;
         }
 
-        if (ignoreJids.includes(body?.key?.remoteJid)) {
-          this.logger.warn('Ignoring message from jid: ' + body?.key?.remoteJid);
+        if (remoteJid && ignoreJids.includes(remoteJid)) {
+          this.logger.warn('Ignoring message from jid: ' + remoteJid);
           return;
         }
       }
