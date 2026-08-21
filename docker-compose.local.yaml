@@ -1,0 +1,70 @@
+# Stack local de QA — builda a Evolution a partir do código deste working tree,
+# em vez de puxar a imagem publicada. Isolado do compose de produção: nomes,
+# volumes e rede próprios, e todas as portas presas em 127.0.0.1.
+#
+#   docker compose -f docker-compose.local.yaml up -d --build
+#   docker compose -f docker-compose.local.yaml logs -f api
+#   docker compose -f docker-compose.local.yaml down -v     (apaga os dados)
+
+name: evo-dev
+
+services:
+  api:
+    container_name: evo_dev_api
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    ports:
+      - '127.0.0.1:8080:8080'
+    volumes:
+      - evo_dev_instances:/evolution/instances
+    env_file:
+      - local.env
+    networks: [evo-dev-net]
+
+  postgres:
+    container_name: evo_dev_postgres
+    image: postgres:15
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: evolution
+      POSTGRES_USER: evolution
+      POSTGRES_PASSWORD: evolution
+    command: ['postgres', '-c', 'max_connections=200']
+    # Exposto para eu conseguir consultar as tabelas direto durante os testes.
+    ports:
+      - '127.0.0.1:5432:5432'
+    volumes:
+      - evo_dev_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U evolution -d evolution']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [evo-dev-net]
+
+  redis:
+    container_name: evo_dev_redis
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ['redis-server', '--appendonly', 'yes']
+    ports:
+      - '127.0.0.1:6379:6379'
+    volumes:
+      - evo_dev_redis:/data
+    networks: [evo-dev-net]
+
+volumes:
+  evo_dev_instances:
+  evo_dev_pg:
+  evo_dev_redis:
+
+networks:
+  evo-dev-net:
+    driver: bridge
