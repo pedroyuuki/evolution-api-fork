@@ -1216,11 +1216,11 @@ export class ChatwootService {
         return parseInt(contentLength, 10);
       }
 
-      const getResponse = await axios.get(url, {
-        responseType: 'arraybuffer',
-        timeout: 30000,
-      });
-      return getResponse.data.byteLength;
+      // Sem content-length, desistimos da medição em vez de baixar o arquivo inteiro só
+      // para conhecer o tamanho: o envio já vai baixá-lo adiante, e a Cloud API recusa o
+      // que passar do limite — erro que hoje é reportado ao atendente com a causa certa.
+      this.logger.warn('[Chatwoot] Resposta sem content-length; validação de tamanho ignorada');
+      return null;
     } catch (error) {
       this.logger.warn(`[Chatwoot] Não foi possível obter tamanho do arquivo: ${error.message}`);
       return null;
