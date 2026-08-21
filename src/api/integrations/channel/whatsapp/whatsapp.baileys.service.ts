@@ -427,9 +427,21 @@ export class BaileysStartupService extends ChannelStartupService {
     if (connection === 'close') {
       const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
 
-      // Correção PR #2365: Previne loop infinito durante geração de QR code
-      const isInitialConnection = !this.instance.wuid && this.instance.qrcode?.count === 0;
-      if (isInitialConnection) {
+      // Correção PR #2365: previne o loop infinito durante a geração do QR code.
+      //
+      // O critério original (!wuid && qrcode.count === 0) também casa com sessões JÁ
+      // pareadas que caem antes do primeiro 'open': wuid só é preenchido no 'open' e
+      // nenhum QR é emitido para quem já tem credencial. Nesse caso o return abortava
+      // reconexão, sincronização de status e tratamento de loggedOut, deixando a
+      // instância morta em silêncio — cenário comum no boot e em stream:error 515.
+      //
+      // Por isso o discriminador é a credencial: só é conexão inicial quem ainda não pareou.
+      const creds = this.client?.authState?.creds ?? this.instance.authState?.state?.creds;
+      const alreadyPaired = Boolean(creds?.me || creds?.registered);
+
+      const isAwaitingFirstPairing = !alreadyPaired && !this.instance.wuid && (this.instance.qrcode?.count ?? 0) === 0;
+
+      if (isAwaitingFirstPairing) {
         this.logger.info(`[${this.instanceName}] Initial connection closed, waiting for QR code generation...`);
         return;
       }
@@ -1462,15 +1474,12 @@ export class BaileysStartupService extends ChannelStartupService {
                   this.logger.log(`Update not read messages ${remoteJid}`);
                   await this.updateChatUnreadMessages(remoteJid);
                 } else if (msg.status === status[4]) {
-                  // CORREÇÃO: Só marca como lida no banco se readMessages estiver explicitamente true
-                  if (this.localSettings.readMessages === true) {
-                    this.logger.log(`Update readed messages ${remoteJid} - ${timestamp}`);
-                    await this.updateMessagesReadedByTimestamp(remoteJid, timestamp);
-                  } else {
-                    this.logger.verbose(
-                      `Message with status READ not marked in DB (readMessages=${this.localSettings.readMessages}) - ${remoteJid}`,
-                    );
-                  }
+                  // Apenas espelha no banco uma leitura que já aconteceu no aparelho.
+                  // Não envia read receipt ao WhatsApp, então não deve ser governado por
+                  // readMessages — que controla se NÓS marcamos como lida. Condicionar aqui
+                  // fazia o contador de não-lidas parar de refletir o que o usuário leu.
+                  this.logger.log(`Update readed messages ${remoteJid} - ${timestamp}`);
+                  await this.updateMessagesReadedByTimestamp(remoteJid, timestamp);
                 }
               } else {
                 // is send message by me - SEMPRE marca como lida (mensagens enviadas pelo usuário)
@@ -1781,16 +1790,12 @@ export class BaileysStartupService extends ChannelStartupService {
 
               if (!cachedTimestamp) {
                 if (status[update.status] === status[4]) {
-                  // CORREÇÃO: Só marca como lida no banco se readMessages estiver explicitamente true
-                  if (this.localSettings.readMessages === true) {
-                    this.logger.log(`Update as read in message.update ${remoteJid} - ${timestamp}`);
-                    await this.updateMessagesReadedByTimestamp(remoteJid, timestamp);
-                    await this.baileysCache.set(messageKey, true, this.MESSAGE_CACHE_TTL_SECONDS);
-                  } else {
-                    this.logger.verbose(
-                      `Message update to READ not applied to DB (readMessages=${this.localSettings.readMessages}) - ${remoteJid}`,
-                    );
-                  }
+                  // Espelho local de uma leitura já ocorrida no aparelho: não emite read
+                  // receipt, então não depende de readMessages. Ver comentário equivalente
+                  // no handler de messages.upsert.
+                  this.logger.log(`Update as read in message.update ${remoteJid} - ${timestamp}`);
+                  await this.updateMessagesReadedByTimestamp(remoteJid, timestamp);
+                  await this.baileysCache.set(messageKey, true, this.MESSAGE_CACHE_TTL_SECONDS);
                 }
 
                 await this.prismaRepository.message.update({
