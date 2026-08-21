@@ -257,7 +257,12 @@ export class BaileysStartupService extends ChannelStartupService {
 
   // Reconnection control
   private reconnectAttempts = 0;
+  private reconnectAlertSent = false;
+  private reconnectTimer?: NodeJS.Timeout;
   private readonly MAX_RECONNECT_ATTEMPTS = 5;
+  /** Backoff exponencial entre tentativas: 2s, 4s, 8s, 16s, 32s, depois 60s fixos. */
+  private static readonly RECONNECT_BASE_DELAY_MS = 2_000;
+  private static readonly RECONNECT_MAX_DELAY_MS = 60_000;
 
   public phoneNumber: string;
 
@@ -266,6 +271,9 @@ export class BaileysStartupService extends ChannelStartupService {
   }
 
   public async logoutInstance() {
+    // Cancela um backoff pendente: sem isso o timer poderia reconectar uma instância
+    // que acabou de ser desconectada de propósito.
+    clearTimeout(this.reconnectTimer);
     this.messageProcessor.onDestroy();
     await this.client?.logout('Log out instance: ' + this.instanceName);
 
@@ -452,51 +460,63 @@ export class BaileysStartupService extends ChannelStartupService {
       if (shouldReconnect) {
         this.reconnectAttempts++;
 
-        if (this.reconnectAttempts > this.MAX_RECONNECT_ATTEMPTS) {
+        // Espera antes de tentar de novo. Sem isso as tentativas eram consumidas todas
+        // no mesmo segundo — uma oscilação de rede de 1s esgotava o limite e a instância
+        // ficava morta até alguém chamar /instance/connect na mão, porque o auto-connect
+        // do boot só processa instâncias em 'open' ou 'connecting'.
+        const backoffMs = Math.min(
+          BaileysStartupService.RECONNECT_BASE_DELAY_MS * 2 ** (this.reconnectAttempts - 1),
+          BaileysStartupService.RECONNECT_MAX_DELAY_MS,
+        );
+
+        // Ao cruzar o limiar avisamos uma vez, para o monitoramento disparar, mas
+        // seguimos tentando: os códigos que realmente encerram a sessão (loggedOut,
+        // forbidden, 402, 406) já foram descartados acima, então insistir é seguro e
+        // evita que uma queda prolongada exija intervenção manual.
+        if (this.reconnectAttempts === this.MAX_RECONNECT_ATTEMPTS && !this.reconnectAlertSent) {
+          this.reconnectAlertSent = true;
           this.logger.error(
-            `[${this.instanceName}] Max reconnection attempts (${this.MAX_RECONNECT_ATTEMPTS}) reached. Marking as disconnected.`,
+            `[${this.instanceName}] ${this.MAX_RECONNECT_ATTEMPTS} reconnection attempts failed (statusCode: ${statusCode}). Still retrying every ${BaileysStartupService.RECONNECT_MAX_DELAY_MS / 1000}s.`,
           );
-          await this.prismaRepository.instance.update({
-            where: { id: this.instanceId },
-            data: {
-              connectionStatus: 'close',
-              disconnectionAt: new Date(),
-              disconnectionReasonCode: statusCode,
-              disconnectionObject: JSON.stringify(lastDisconnect),
-            },
-          });
           this.sendDataWebhook(Events.STATUS_INSTANCE, {
             instance: this.instance.name,
-            status: 'closed',
+            status: 'reconnecting',
             disconnectionAt: new Date(),
             disconnectionReasonCode: statusCode,
             disconnectionObject: JSON.stringify(lastDisconnect),
           });
-          return;
         }
 
-        // Sincroniza banco para 'connecting' antes de reconectar
+        // Mantém o banco em 'connecting' para que o auto-connect do boot recupere a
+        // instância caso o processo reinicie no meio de uma indisponibilidade.
         await this.prismaRepository.instance.update({
           where: { id: this.instanceId },
           data: { connectionStatus: 'connecting' },
         });
 
-        // Modelo híbrido: tentativas 1-3 reconexão simples, 4-5 reinicialização completa
-        if (this.reconnectAttempts <= 3) {
+        // Modelo híbrido: as 3 primeiras são reconexão simples, daí em diante
+        // reinicialização completa do cliente.
+        if (this.reconnectAttempts > 3) {
           this.logger.warn(
-            `[${this.instanceName}] Connection lost (statusCode: ${statusCode}), simple reconnect... (attempt ${this.reconnectAttempts}/${this.MAX_RECONNECT_ATTEMPTS})`,
+            `[${this.instanceName}] Connection lost (statusCode: ${statusCode}), full restart in ${backoffMs}ms... (attempt ${this.reconnectAttempts})`,
           );
-          await this.connectToWhatsapp(this.phoneNumber);
-        } else {
-          this.logger.warn(
-            `[${this.instanceName}] Connection lost (statusCode: ${statusCode}), full restart... (attempt ${this.reconnectAttempts}/${this.MAX_RECONNECT_ATTEMPTS})`,
-          );
-          // Reinicialização completa: fecha WebSocket e cliente antes de reconectar
           this.client?.ws?.close();
           this.client?.end(new Error('auto-reconnect-full-restart'));
-          await this.connectToWhatsapp(this.phoneNumber);
+        } else {
+          this.logger.warn(
+            `[${this.instanceName}] Connection lost (statusCode: ${statusCode}), simple reconnect in ${backoffMs}ms... (attempt ${this.reconnectAttempts})`,
+          );
         }
+
+        clearTimeout(this.reconnectTimer);
+        this.reconnectTimer = setTimeout(() => {
+          this.connectToWhatsapp(this.phoneNumber).catch((error) =>
+            this.logger.error(`[${this.instanceName}] Reconnection attempt failed: ${error?.message ?? error}`),
+          );
+        }, backoffMs);
+        this.reconnectTimer.unref?.();
       } else {
+        clearTimeout(this.reconnectTimer);
         this.sendDataWebhook(Events.STATUS_INSTANCE, {
           instance: this.instance.name,
           status: 'closed',
@@ -556,6 +576,8 @@ export class BaileysStartupService extends ChannelStartupService {
 
       // Reset reconnect attempts on successful connection
       this.reconnectAttempts = 0;
+      this.reconnectAlertSent = false;
+      clearTimeout(this.reconnectTimer);
 
       await this.prismaRepository.instance.update({
         where: { id: this.instanceId },
