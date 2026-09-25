@@ -1,0 +1,85 @@
+# Chatwoot local de QA, na mesma versão da produção (sendingtk/chatwoot:v3.15.8).
+# Entra na rede do stack da Evolution (docker-compose.local.yaml) para que os dois se
+# enxerguem pelo nome: a Evolution fala com http://chatwoot_app:3000 e o Chatwoot
+# chama o webhook em http://evo_dev_api:8080.
+#
+#   docker compose -f docker-compose.chatwoot.yaml up -d chatwoot_postgres chatwoot_redis
+#   docker compose -f docker-compose.chatwoot.yaml run --rm chatwoot_app bundle exec rails db:chatwoot_prepare
+#   docker compose -f docker-compose.chatwoot.yaml up -d
+#
+# Espera um chatwoot-local.env ao lado (coberto pelo *.env do .gitignore).
+
+name: cw-dev
+
+x-chatwoot: &chatwoot
+  image: sendingtk/chatwoot:v3.15.8
+  platform: linux/amd64
+  env_file: chatwoot-local.env
+  volumes:
+    - cw_dev_storage:/app/storage
+  depends_on:
+    chatwoot_postgres:
+      condition: service_healthy
+    chatwoot_redis:
+      condition: service_started
+  networks: [evo-dev-net]
+  restart: unless-stopped
+
+services:
+  chatwoot_app:
+    <<: *chatwoot
+    container_name: cw_dev_app
+    entrypoint: docker/entrypoints/rails.sh
+    command: bundle exec rails s -p 3000 -b 0.0.0.0
+    ports:
+      - '127.0.0.1:3000:3000'
+    # O validador de URL da Evolution (isURL) recusa "_" no hostname, então o nome
+    # do serviço não serve para configurar a integração. Use http://chatwoot-app:3000.
+    networks:
+      evo-dev-net:
+        aliases: [chatwoot-app]
+
+  chatwoot_sidekiq:
+    <<: *chatwoot
+    container_name: cw_dev_sidekiq
+    command: bundle exec sidekiq -C config/sidekiq.yml
+
+  chatwoot_postgres:
+    container_name: cw_dev_postgres
+    # pgvector é um superconjunto do postgres oficial; cobre migrações que habilitam a extensão.
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: chatwoot_nestor
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: chatwoot
+    # Exposto para inspecionar contatos e conversas direto durante os testes.
+    ports:
+      - '127.0.0.1:5433:5432'
+    volumes:
+      - cw_dev_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres -d chatwoot_nestor']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [evo-dev-net]
+
+  chatwoot_redis:
+    container_name: cw_dev_redis
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ['redis-server', '--appendonly', 'yes']
+    volumes:
+      - cw_dev_redis:/data
+    networks: [evo-dev-net]
+
+volumes:
+  cw_dev_storage:
+  cw_dev_pg:
+  cw_dev_redis:
+
+networks:
+  evo-dev-net:
+    external: true
+    name: evo-dev_evo-dev-net

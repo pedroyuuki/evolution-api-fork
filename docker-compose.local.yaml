@@ -26,7 +26,11 @@ services:
       - evo_dev_instances:/evolution/instances
     env_file:
       - local.env
-    networks: [evo-dev-net]
+    # Alias sem "_" para o Chatwoot local (docker-compose.chatwoot.yaml) chamar o
+    # webhook: http://evolution-api:8080/chatwoot/webhook/<instancia>.
+    networks:
+      evo-dev-net:
+        aliases: [evolution-api]
 
   postgres:
     container_name: evo_dev_postgres
