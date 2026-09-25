@@ -83,6 +83,7 @@ import { createJid } from '@utils/createJid';
 import { fetchLatestWaWebVersion } from '@utils/fetchLatestWaWebVersion';
 import { makeProxyAgent, makeProxyAgentUndici } from '@utils/makeProxyAgent';
 import { getOnWhatsappCache, saveOnWhatsappCache } from '@utils/onWhatsappCache';
+import { decideReconnect } from '@utils/reconnectPolicy';
 import { status } from '@utils/renderStatus';
 import { sendTelemetry } from '@utils/sendTelemetry';
 import useMultiFileAuthStatePrisma from '@utils/use-multi-file-auth-state-prisma';
@@ -260,9 +261,12 @@ export class BaileysStartupService extends ChannelStartupService {
   private reconnectAlertSent = false;
   private reconnectTimer?: NodeJS.Timeout;
   private readonly MAX_RECONNECT_ATTEMPTS = 5;
-  /** Backoff exponencial entre tentativas: 2s, 4s, 8s, 16s, 32s, depois 60s fixos. */
-  private static readonly RECONNECT_BASE_DELAY_MS = 2_000;
-  private static readonly RECONNECT_MAX_DELAY_MS = 60_000;
+  /**
+   * Sockets já substituídos por um mais novo. Os eventos deles ainda chegam ao mesmo
+   * handler e, sem esse filtro, o 'close' de um socket descartado era tratado como
+   * queda da conexão atual e disparava outra reconexão.
+   */
+  private readonly supersededSockets = new WeakSet<WASocket>();
 
   public phoneNumber: string;
 
@@ -454,66 +458,66 @@ export class BaileysStartupService extends ChannelStartupService {
         return;
       }
 
-      const codesToNotReconnect = [DisconnectReason.loggedOut, DisconnectReason.forbidden, 402, 406];
-      const shouldReconnect = !codesToNotReconnect.includes(statusCode);
+      // A política decide se reconecta, em quanto tempo e se conta como falha. O 515
+      // pós-pareamento e a expiração de QR não podem passar pelo backoff: esperar ali
+      // fazia o celular desistir do pareamento. Ver src/utils/reconnectPolicy.ts.
+      const decision = decideReconnect({
+        statusCode,
+        isPaired: alreadyPaired,
+        attempts: this.reconnectAttempts + 1,
+      });
 
-      if (shouldReconnect) {
-        this.reconnectAttempts++;
+      if (decision.reconnect) {
+        if (decision.countsAsFailure) {
+          this.reconnectAttempts++;
 
-        // Espera antes de tentar de novo. Sem isso as tentativas eram consumidas todas
-        // no mesmo segundo — uma oscilação de rede de 1s esgotava o limite e a instância
-        // ficava morta até alguém chamar /instance/connect na mão, porque o auto-connect
-        // do boot só processa instâncias em 'open' ou 'connecting'.
-        const backoffMs = Math.min(
-          BaileysStartupService.RECONNECT_BASE_DELAY_MS * 2 ** (this.reconnectAttempts - 1),
-          BaileysStartupService.RECONNECT_MAX_DELAY_MS,
-        );
+          // Ao cruzar o limiar avisamos uma vez, para o monitoramento disparar, mas
+          // seguimos tentando: os códigos que realmente encerram a sessão já foram
+          // descartados pela política, então insistir é seguro e evita que uma queda
+          // prolongada exija intervenção manual.
+          if (this.reconnectAttempts === this.MAX_RECONNECT_ATTEMPTS && !this.reconnectAlertSent) {
+            this.reconnectAlertSent = true;
+            this.logger.error(
+              `[${this.instanceName}] ${this.MAX_RECONNECT_ATTEMPTS} reconnection attempts failed (statusCode: ${statusCode}). Still retrying with backoff.`,
+            );
+            this.sendDataWebhook(Events.STATUS_INSTANCE, {
+              instance: this.instance.name,
+              status: 'reconnecting',
+              disconnectionAt: new Date(),
+              disconnectionReasonCode: statusCode,
+              disconnectionObject: JSON.stringify(lastDisconnect),
+            });
+          }
 
-        // Ao cruzar o limiar avisamos uma vez, para o monitoramento disparar, mas
-        // seguimos tentando: os códigos que realmente encerram a sessão (loggedOut,
-        // forbidden, 402, 406) já foram descartados acima, então insistir é seguro e
-        // evita que uma queda prolongada exija intervenção manual.
-        if (this.reconnectAttempts === this.MAX_RECONNECT_ATTEMPTS && !this.reconnectAlertSent) {
-          this.reconnectAlertSent = true;
-          this.logger.error(
-            `[${this.instanceName}] ${this.MAX_RECONNECT_ATTEMPTS} reconnection attempts failed (statusCode: ${statusCode}). Still retrying every ${BaileysStartupService.RECONNECT_MAX_DELAY_MS / 1000}s.`,
-          );
-          this.sendDataWebhook(Events.STATUS_INSTANCE, {
-            instance: this.instance.name,
-            status: 'reconnecting',
-            disconnectionAt: new Date(),
-            disconnectionReasonCode: statusCode,
-            disconnectionObject: JSON.stringify(lastDisconnect),
+          // Mantém o banco em 'connecting' para que o auto-connect do boot recupere a
+          // instância caso o processo reinicie no meio de uma indisponibilidade.
+          await this.prismaRepository.instance.update({
+            where: { id: this.instanceId },
+            data: { connectionStatus: 'connecting' },
           });
-        }
 
-        // Mantém o banco em 'connecting' para que o auto-connect do boot recupere a
-        // instância caso o processo reinicie no meio de uma indisponibilidade.
-        await this.prismaRepository.instance.update({
-          where: { id: this.instanceId },
-          data: { connectionStatus: 'connecting' },
-        });
-
-        // Modelo híbrido: as 3 primeiras são reconexão simples, daí em diante
-        // reinicialização completa do cliente.
-        if (this.reconnectAttempts > 3) {
           this.logger.warn(
-            `[${this.instanceName}] Connection lost (statusCode: ${statusCode}), full restart in ${backoffMs}ms... (attempt ${this.reconnectAttempts})`,
+            `[${this.instanceName}] Connection lost (statusCode: ${statusCode}), ${
+              decision.fullRestart ? 'full restart' : 'simple reconnect'
+            } in ${decision.delayMs}ms... (attempt ${this.reconnectAttempts})`,
           );
-          this.client?.ws?.close();
-          this.client?.end(new Error('auto-reconnect-full-restart'));
         } else {
-          this.logger.warn(
-            `[${this.instanceName}] Connection lost (statusCode: ${statusCode}), simple reconnect in ${backoffMs}ms... (attempt ${this.reconnectAttempts})`,
+          this.logger.info(
+            `[${this.instanceName}] Connection closed (statusCode: ${statusCode}), reconnecting now (${
+              statusCode === DisconnectReason.restartRequired ? 'restart required' : 'pairing in progress'
+            })`,
           );
         }
 
+        // Um único timer por instância: um fechamento novo substitui o agendado. O
+        // descarte do socket anterior acontece em createClient, que é o único lugar que
+        // troca o socket.
         clearTimeout(this.reconnectTimer);
         this.reconnectTimer = setTimeout(() => {
           this.connectToWhatsapp(this.phoneNumber).catch((error) =>
             this.logger.error(`[${this.instanceName}] Reconnection attempt failed: ${error?.message ?? error}`),
           );
-        }, backoffMs);
+        }, decision.delayMs);
         this.reconnectTimer.unref?.();
       } else {
         clearTimeout(this.reconnectTimer);
@@ -802,6 +806,20 @@ export class BaileysStartupService extends ChannelStartupService {
 
     this.endSession = false;
 
+    // Único ponto que troca o socket. O anterior é marcado como substituído ANTES de
+    // ser encerrado, para que o 'close' que o end() emite seja ignorado pelo handler
+    // (seja síncrono ou não) em vez de acionar mais uma reconexão. Encerrá-lo também
+    // evita dois sockets com a mesma credencial disputando a sessão no servidor.
+    const previousClient = this.client;
+    if (previousClient) {
+      this.supersededSockets.add(previousClient);
+      try {
+        previousClient.end(undefined);
+      } catch {
+        // socket já encerrado
+      }
+    }
+
     this.client = makeWASocket(socketConfig);
 
     if (this.localSettings.wavoipToken && this.localSettings.wavoipToken.length > 0) {
@@ -829,6 +847,10 @@ export class BaileysStartupService extends ChannelStartupService {
 
   public async connectToWhatsapp(number?: string): Promise<WASocket> {
     try {
+      // Uma conexão pedida por fora (manager, API, boot) substitui a reconexão
+      // automática que estiver agendada; sem isso, as duas abriam sockets em paralelo.
+      clearTimeout(this.reconnectTimer);
+
       this.logger.info(`Connecting instance ${this.instanceName}...`);
 
       await this.loadChatwoot();
@@ -2006,7 +2028,13 @@ export class BaileysStartupService extends ChannelStartupService {
   };
 
   private eventHandler() {
-    this.client.ev.process(async (events) => {
+    const socket = this.client;
+
+    socket.ev.process(async (events) => {
+      if (this.supersededSockets.has(socket)) {
+        return;
+      }
+
       this.eventProcessingQueue = this.eventProcessingQueue.then(async () => {
         try {
           if (!this.endSession) {
