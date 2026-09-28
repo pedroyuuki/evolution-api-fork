@@ -5,11 +5,16 @@ import { postgresClient } from '@api/integrations/chatbot/chatwoot/libs/postgres
 import { chatwootImport } from '@api/integrations/chatbot/chatwoot/utils/chatwoot-import-helper';
 import {
   ContactIdentity,
+  contactIdentityFromJids,
   contactIdentityFromKey,
+  contactLookup,
   ContactUpdate,
+  identityPhoneDigits,
+  nameScore,
   participantIdentityFromKey,
   pickInboxConversation,
   planContactLink,
+  sameContactCandidates,
 } from '@api/integrations/chatbot/chatwoot/utils/contact-identity';
 import { PrismaRepository } from '@api/repository/repository.service';
 import { CacheService } from '@api/services/cache.service';
@@ -29,6 +34,8 @@ import ChatwootClient, {
 import { request as chatwootRequest } from '@figuro/chatwoot-sdk/dist/core/request';
 import { Chatwoot as ChatwootModel, Contact as ContactModel, Message as MessageModel } from '@prisma/client';
 import i18next from '@utils/i18n';
+import { isRealLidJid } from '@utils/jidIdentity';
+import { getOnWhatsappCache } from '@utils/onWhatsappCache';
 import { sendTelemetry } from '@utils/sendTelemetry';
 import axios from 'axios';
 import { WAMessageContent, WAMessageKey } from 'baileys';
@@ -556,19 +563,19 @@ export class ChatwootService {
     }
   }
 
-  /** Contatos cujo identifier é exatamente um dos informados (a busca `q` é por semelhança). */
-  private async findContactsByIdentifiers(identifiers: string[]): Promise<any[]> {
-    if (!identifiers.length) return [];
+  /** Contatos cujo atributo é exatamente um dos valores (a busca `q` é por semelhança). */
+  private async findContactsByAttribute(attribute: 'identifier' | 'phone_number', values: string[]): Promise<any[]> {
+    if (!values.length) return [];
 
     const response = (await chatwootRequest(this.getClientCwConfig(), {
       method: 'POST',
       url: `/api/v1/accounts/${this.provider.accountId}/contacts/filter`,
       body: {
-        payload: identifiers.map((identifier, index) => ({
-          attribute_key: 'identifier',
+        payload: values.map((value, index) => ({
+          attribute_key: attribute,
           filter_operator: 'equal_to',
-          values: [identifier],
-          query_operator: index === identifiers.length - 1 ? null : 'OR',
+          values: [value],
+          query_operator: index === values.length - 1 ? null : 'OR',
         })),
       },
     })) as any;
@@ -577,11 +584,45 @@ export class ChatwootService {
   }
 
   /**
-   * Encontra o contato individual pelo identifier (número e LID) e, só depois, pelo telefone;
-   * religa ou mescla o contato criado com o LID e cria quando não há nenhum. A decisão está
-   * em planContactLink. O vínculo existente nunca é descartado: na pior hipótese (API
-   * recusou a correção) a mensagem segue para o contato que já existia.
+   * Junta num único contato todos os cadastros da mesma pessoa — criados com o LID, pelo
+   * atendente com o 9º dígito trocado, ou pela Evolution — e deixa nele o melhor nome, o
+   * identifier canônico e o telefone em E.164. A decisão está em planContactLink.
+   * Devolve null quando não há cadastro nenhum.
    */
+  private async consolidateContact(instance: InstanceDto, identity: ContactIdentity, retry = true): Promise<any> {
+    const lookup = contactLookup(identity);
+    const [byIdentifier, byPhone] = await Promise.all([
+      this.findContactsByAttribute('identifier', lookup.identifiers),
+      this.findContactsByAttribute(
+        'phone_number',
+        lookup.phones.map((phone) => phone.replace('+', '')),
+      ),
+    ]);
+    const candidates = sameContactCandidates(identity, [...byIdentifier, ...byPhone]);
+
+    const plan = planContactLink(identity, candidates);
+    if (plan.action === 'create') return null;
+
+    for (const mergeId of plan.mergeIds) {
+      if (await this.mergeContacts(plan.baseId, mergeId)) {
+        this.logger.info(`Chatwoot: contato ${mergeId} mesclado em ${plan.baseId} (${identity.primaryJid})`);
+      } else if (retry) {
+        // Outro processo pode ter mesclado o mesmo par: refaz a busca uma vez.
+        this.logger.warn(`Chatwoot: falha ao mesclar ${mergeId} em ${plan.baseId}, buscando de novo`);
+        return this.consolidateContact(instance, identity, false);
+      }
+    }
+
+    const base = candidates.find((contact) => contact.id === plan.baseId);
+    if (plan.update) {
+      this.logger.info(
+        `Chatwoot: contato ${base.id} atualizado para ${identity.primaryJid}: ${JSON.stringify(plan.update)}`,
+      );
+    }
+    return this.applyContactUpdate(instance, base, plan.update);
+  }
+
+  /** Encontra (consolidando os duplicados) ou cria o contato individual da identidade. */
   private async linkContact(
     instance: InstanceDto,
     identity: ContactIdentity,
@@ -589,59 +630,70 @@ export class ChatwootService {
     name: string,
     avatarUrl: string | null,
   ) {
-    const digits = (jid: string) => jid.split('@')[0];
-    const byIdentifier = await this.findContactsByIdentifiers([identity.pnJid, identity.lidJid].filter(Boolean));
+    const contact = await this.consolidateContact(instance, identity);
+    if (contact) return contact;
 
-    const pnContact = identity.pnJid
-      ? (byIdentifier.find((contact) => contact.identifier === identity.pnJid) ??
-        (await this.findContact(instance, digits(identity.pnJid))))
-      : null;
-    // Contatos legados guardavam os dígitos do LID como telefone; o identifier nem sempre.
-    const lidContact = identity.lidJid
-      ? (byIdentifier.find((contact) => contact.identifier === identity.lidJid) ??
-        (await this.findContact(instance, digits(identity.lidJid))))
-      : null;
+    const plan = planContactLink(identity);
+    if (plan.action !== 'create') return null;
 
-    const plan = planContactLink(identity, pnContact, lidContact);
+    const phone = plan.phoneNumber ? plan.phoneNumber.replace('+', '') : plan.identifier.split('@')[0];
+    const created: any = await this.createContact(instance, phone, inboxId, false, name, avatarUrl, plan.identifier);
+    return created?.payload?.contact ?? created;
+  }
 
-    if (plan.action === 'create') {
-      const phone = plan.phoneNumber ? plan.phoneNumber.replace('+', '') : digits(plan.identifier);
-      return this.createContact(instance, phone, inboxId, false, name, avatarUrl, plan.identifier);
+  /**
+   * Contato criado pelo atendente (sem identifier): antes de enviar, descobre o JID pelo
+   * número e o liga aos outros cadastros da mesma pessoa. Sem isso a resposta do cliente
+   * caía em outra conversa. Só no Baileys, que resolve o número; nos outros canais a
+   * consolidação acontece quando o cliente responder.
+   */
+  private async linkContactCreatedByAgent(
+    instance: InstanceDto,
+    waInstance: any,
+    phone: string,
+    conversationId: number,
+  ) {
+    try {
+      if (waInstance?.integration !== Integration.WHATSAPP_BAILEYS) return;
+
+      const [result] = await waInstance.whatsappNumber({ numbers: [phone] });
+      if (!result?.exists) return;
+
+      const cachedLid = (await getOnWhatsappCache([result.jid]))[0]?.lid;
+      const identity = contactIdentityFromJids(result.jid, isRealLidJid(cachedLid) ? cachedLid : undefined);
+      if (!identity?.pnJid) return;
+
+      const contact = await this.consolidateContact(instance, identity);
+      if (!contact) return;
+
+      // A conversa em que o atendente está falando passa a ser a da resposta do cliente.
+      await this.cache.set(`${instance.instanceName}:createConversation-${identity.pnJid}`, conversationId, 1800);
+    } catch (error) {
+      this.logger.warn(`Chatwoot: não foi possível ligar o contato ${phone}: ${error?.message ?? error}`);
     }
-
-    if (plan.action === 'merge') {
-      const merged = await this.mergeContacts(plan.baseId, plan.mergeeId);
-      if (merged) {
-        this.logger.info(`Chatwoot: contato LID ${plan.mergeeId} mesclado em ${plan.baseId} (${identity.pnJid})`);
-      } else {
-        this.logger.warn(`Chatwoot: falha ao mesclar o contato LID ${plan.mergeeId} em ${plan.baseId}`);
-      }
-      return this.applyContactUpdate(instance, pnContact, plan.update);
-    }
-
-    const contact = plan.contactId === pnContact?.id ? pnContact : lidContact;
-    if (plan.update && contact === lidContact) {
-      this.logger.info(`Chatwoot: contato ${contact.id} religado de ${identity.lidJid} para ${identity.pnJid}`);
-    }
-    return this.applyContactUpdate(instance, contact, plan.update);
   }
 
   private async applyContactUpdate(instance: InstanceDto, contact: any, update?: ContactUpdate) {
     if (!update) return contact;
 
-    const unwrap = (response: any) => response?.payload?.contact ?? response?.payload ?? response;
+    // Telefone e identifier são únicos na conta: se outro cadastro (de outra pessoa) já os
+    // tem, grava o que der em vez de perder a atualização inteira.
+    const { phone_number, ...withoutPhone } = update;
+    const attempts = [update, phone_number ? withoutPhone : undefined, update.name ? { name: update.name } : undefined];
 
-    let updated: any = await this.updateContact(instance, contact.id, update);
-    if (!updated && update.identifier && update.phone_number) {
-      // O telefone pode pertencer a outro cadastro; o identifier sozinho já mantém o vínculo.
-      updated = await this.updateContact(instance, contact.id, { identifier: update.identifier });
-    }
-    if (!updated) {
-      this.logger.warn(`Chatwoot: não foi possível atualizar o contato ${contact.id}: ${JSON.stringify(update)}`);
-      return contact;
+    for (const attempt of attempts) {
+      if (!attempt || !Object.keys(attempt).length) continue;
+      const updated: any = await this.updateContact(instance, contact.id, attempt);
+      if (updated) {
+        if (attempt !== update) {
+          this.logger.warn(`Chatwoot: contato ${contact.id} atualizado parcialmente: ${JSON.stringify(attempt)}`);
+        }
+        return { ...contact, ...(updated?.payload?.contact ?? updated?.payload ?? updated) };
+      }
     }
 
-    return { ...contact, ...unwrap(updated) };
+    this.logger.warn(`Chatwoot: não foi possível atualizar o contato ${contact.id}: ${JSON.stringify(update)}`);
+    return contact;
   }
 
   private async mergeBrazilianContacts(contacts: any[]) {
@@ -838,7 +890,6 @@ export class ChatwootService {
             // Mensagem própria em grupo pode vir sem participant.
             const participant = participantIdentityFromKey(body.key);
             if (participant) {
-              const participantDigits = participant.primaryJid.split('@')[0];
               const picture_url = await waInstance.profilePicture(participant.primaryJid);
               this.logger.verbose(`Participant profile picture URL: ${JSON.stringify(picture_url)}`);
 
@@ -850,7 +901,12 @@ export class ChatwootService {
                 picture_url.profilePictureUrl || null,
               );
 
-              if (findParticipant?.id && (!findParticipant.name || findParticipant.name === participantDigits)) {
+              const participantPhones = identityPhoneDigits(participant);
+              if (
+                findParticipant?.id &&
+                nameScore(findParticipant.name, participantPhones) <= 0 &&
+                nameScore(body.pushName, participantPhones) > 0
+              ) {
                 this.logger.verbose(
                   `Found participant: ID:${findParticipant.id} - Name: ${findParticipant.name} - identifier: ${findParticipant.identifier}`,
                 );
@@ -901,9 +957,11 @@ export class ChatwootService {
             picture_url?.profilePictureUrl?.split('#')[0].split('?')[0].split('/').pop() || '';
           const chatwootProfilePictureFile = contact?.thumbnail?.split('#')[0].split('?')[0].split('/').pop() || '';
           const pictureNeedsUpdate = waProfilePictureFile !== chatwootProfilePictureFile;
-          // Contatos legados criados pelo LID têm os dígitos do LID como nome.
-          const placeholderNames = [chatId, identity?.lidJid?.split('@')[0]].filter(Boolean);
-          const nameNeedsUpdate = !contact.name || placeholderNames.includes(contact.name);
+          // Nome-número (inclusive os dígitos do LID) é trocado pelo pushName quando ele é um nome.
+          const phones = identity ? identityPhoneDigits(identity) : [chatId];
+          const nameNeedsUpdate = identity
+            ? nameScore(contact.name, phones) <= 0 && nameScore(nameContact, phones) > 0
+            : !contact.name || contact.name === chatId;
           this.logger.verbose(`Picture needs update: ${pictureNeedsUpdate}`);
           this.logger.verbose(`Name needs update: ${nameNeedsUpdate}`);
           if (pictureNeedsUpdate || nameNeedsUpdate) {
@@ -1712,6 +1770,11 @@ export class ChatwootService {
             state: connectionState,
           });
           return { message: 'bot' };
+        }
+
+        const conversationSender = body.conversation.meta?.sender;
+        if (conversationSender && !conversationSender.identifier && !chatId.includes('@')) {
+          await this.linkContactCreatedByAgent(instance, waInstance, chatId, body.conversation.id);
         }
 
         let formatText: string;

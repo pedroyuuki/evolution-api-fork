@@ -1,3 +1,4 @@
+import { getAvailableNumbers } from '@utils/jidIdentity';
 import { isJidGroup, isLidUser, isPnUser, jidNormalizedUser } from 'baileys';
 
 /**
@@ -23,14 +24,16 @@ export type ChatwootContactRef = {
   id: number;
   identifier?: string | null;
   phone_number?: string | null;
+  email?: string | null;
+  name?: string | null;
+  created_at?: number | null;
 };
 
-export type ContactUpdate = { identifier?: string; phone_number?: string };
+export type ContactUpdate = { name?: string; identifier?: string; phone_number?: string };
 
 export type ContactLinkPlan =
   | { action: 'create'; identifier: string; phoneNumber?: string }
-  | { action: 'use'; contactId: number; update?: ContactUpdate }
-  | { action: 'merge'; baseId: number; mergeeId: number; update?: ContactUpdate };
+  | { action: 'link'; baseId: number; mergeIds: number[]; update?: ContactUpdate };
 
 function normalize(jid?: string | null): string | undefined {
   if (!jid) return undefined;
@@ -41,7 +44,11 @@ function digitsOf(jid: string): string {
   return jid.split('@')[0].split(':')[0];
 }
 
-/** Monta a identidade a partir de um par principal/Alt, em qualquer ordem. */
+function clean(value?: string | null): string | undefined {
+  return value?.trim() || undefined;
+}
+
+/** Monta a identidade a partir de JIDs em qualquer ordem. */
 export function contactIdentityFromJids(...jids: (string | null | undefined)[]): ContactIdentity | undefined {
   let pnJid: string | undefined;
   let lidJid: string | undefined;
@@ -70,8 +77,8 @@ export function participantIdentityFromKey(key?: KeyLike | null): ContactIdentit
 
 /**
  * Telefone de exibição em E.164. No Brasil o JID de celulares com DDD 31 ou maior vem sem
- * o 9º dígito, mas o número real (e o que o atendente vê e disca) tem o 9: celulares
- * começam com 6 a 9 depois do DDD. Fixos (2 a 5) ficam como estão.
+ * o 9º dígito, mas o número real (e o que o atendente vê, procura e disca) tem o 9:
+ * celulares começam com 6 a 9 depois do DDD. Fixos (2 a 5) ficam como estão.
  */
 export function displayPhone(pnJid: string): string {
   const digits = digitsOf(pnJid);
@@ -79,61 +86,131 @@ export function displayPhone(pnJid: string): string {
   return `+${isBrazilianMobileWithoutNine ? `${digits.slice(0, 4)}9${digits.slice(4)}` : digits}`;
 }
 
-/** O telefone do contato é o LID gravado como se fosse número (versões anteriores faziam isso). */
-function hasLidAsPhone(contact: ChatwootContactRef, lidJid?: string): boolean {
-  return Boolean(lidJid) && contact.phone_number === `+${digitsOf(lidJid)}`;
-}
-
-/** Correção do contato que representa o número: identifier no JID canônico e telefone real. */
-function pnContactUpdate(contact: ChatwootContactRef, identity: ContactIdentity): ContactUpdate | undefined {
-  const update: ContactUpdate = {};
-  if (contact.identifier !== identity.pnJid) update.identifier = identity.pnJid;
-  if (!contact.phone_number || hasLidAsPhone(contact, identity.lidJid)) {
-    update.phone_number = displayPhone(identity.pnJid);
-  }
-  return Object.keys(update).length ? update : undefined;
+/**
+ * O que procurar no Chatwoot para achar todos os cadastros da mesma pessoa: o identifier
+ * pelo número (e as variantes do 9º dígito), pelo LID, e os telefones dessas variantes —
+ * inclusive os dígitos do LID, que versões anteriores gravavam como telefone.
+ */
+export function contactLookup(identity: ContactIdentity): { identifiers: string[]; phones: string[] } {
+  const pnVariants = identity.pnJid ? getAvailableNumbers(identity.pnJid) : [];
+  const identifiers = [...pnVariants, identity.lidJid].filter(Boolean);
+  const phones = identifiers.map((jid) => `+${digitsOf(jid)}`);
+  return { identifiers: [...new Set(identifiers)], phones: [...new Set(phones)] };
 }
 
 /**
- * Decide como ligar a mensagem a um contato do Chatwoot sem quebrar o vínculo existente.
- *
- * - Contato do número e contato do LID diferentes: o LID é mesclado no do número. O merge
- *   do Chatwoot leva as conversas e mensagens do LID para a base, então o histórico legado
- *   continua no mesmo lugar.
- * - Só o contato do LID existe e o número é conhecido: ele é religado no lugar (identifier
- *   e telefone passam para o número), mantendo o id, as conversas e os atributos.
- * - Só o contato do número: usado como está, corrigindo identifier/telefone se preciso.
- * - Nenhum: cria pelo número; sem número, pelo LID e sem telefone — dígitos de LID nunca
- *   viram telefone.
+ * Um contato achado pela busca só é da mesma pessoa se o identifier estiver vazio ou for
+ * um JID dela. Contato com identifier de outra pessoa nunca entra, mesmo com telefone
+ * parecido — a busca por telefone é por variante e não pode mesclar gente diferente.
  */
-export function planContactLink(
-  identity: ContactIdentity,
-  pnContact?: ChatwootContactRef | null,
-  lidContact?: ChatwootContactRef | null,
-): ContactLinkPlan {
-  if (pnContact && identity.pnJid) {
-    const update = pnContactUpdate(pnContact, identity);
-    if (lidContact && lidContact.id !== pnContact.id) {
-      return { action: 'merge', baseId: pnContact.id, mergeeId: lidContact.id, update };
-    }
-    return { action: 'use', contactId: pnContact.id, update };
+export function sameContactCandidates(identity: ContactIdentity, found: ChatwootContactRef[]): ChatwootContactRef[] {
+  const { identifiers, phones } = contactLookup(identity);
+  const byId = new Map<number, ChatwootContactRef>();
+
+  for (const contact of found) {
+    if (!contact?.id || byId.has(contact.id)) continue;
+    const identifier = clean(contact.identifier);
+    const matchesIdentifier = identifier && identifiers.includes(identifier);
+    const matchesPhone = !identifier && phones.includes(clean(contact.phone_number));
+    if (matchesIdentifier || matchesPhone) byId.set(contact.id, contact);
   }
 
-  if (lidContact) {
-    if (identity.pnJid) {
-      return {
-        action: 'use',
-        contactId: lidContact.id,
-        update: { identifier: identity.pnJid, phone_number: displayPhone(identity.pnJid) },
-      };
-    }
-    return { action: 'use', contactId: lidContact.id };
+  return [...byId.values()];
+}
+
+/**
+ * Qual cadastro sobrevive: quem tem e-mail (o dado que o atendente preencheu e que não se
+ * reconstrói), depois o mais antigo, depois o menor id. Nada se perde pela direção: o
+ * merge do Chatwoot preenche o que está vazio na base com o do outro contato, e nome,
+ * identifier e telefone são consolidados depois.
+ */
+export function electBaseContact(candidates: ChatwootContactRef[]): ChatwootContactRef | undefined {
+  const withEmail = candidates.filter((contact) => clean(contact.email));
+  const pool = withEmail.length ? withEmail : candidates;
+  const age = (contact: ChatwootContactRef) => contact.created_at ?? Number.POSITIVE_INFINITY;
+  return [...pool].sort((a, b) => age(a) - age(b) || a.id - b.id)[0];
+}
+
+/**
+ * Qualidade de um nome de contato. Zero ou menos é placeholder: vazio, só números, contém
+ * o telefone ou não tem letras (padrões que a Evolution gera quando não há pushName). Um
+ * nome real ganha pontos por ter sobrenome e por comprimento.
+ */
+export function nameScore(name: string | null | undefined, phoneDigits: string[]): number {
+  const value = clean(name);
+  if (!value) return -1;
+
+  const digits = value.replace(/\D/g, '');
+  if (digits.length >= 8) return 0;
+  if (phoneDigits.some((phone) => phone && value.includes(phone.slice(-8)))) return 0;
+  if (!/[A-Za-zÀ-ÿ]/.test(value)) return 0;
+
+  let score = 1;
+  if (/\s/.test(value)) score += 2;
+  score += Math.min(value.length / 20, 1);
+  return score;
+}
+
+/** Dígitos de telefone da identidade, para reconhecer nome-número. */
+export function identityPhoneDigits(identity: ContactIdentity): string[] {
+  return contactLookup(identity).phones.map((phone) => phone.slice(1));
+}
+
+/**
+ * O melhor nome entre todos os cadastros, independente de qual sobrevive. Empate fica com
+ * a base; se nenhum nome for real, mantém o da base. Devolve undefined quando não muda.
+ */
+function consolidatedName(
+  base: ChatwootContactRef,
+  candidates: ChatwootContactRef[],
+  phoneDigits: string[],
+): string | undefined {
+  const ranked = [...candidates].sort(
+    (a, b) => nameScore(b.name, phoneDigits) - nameScore(a.name, phoneDigits) || (a.id === base.id ? -1 : 1),
+  );
+  const best = clean(ranked[0]?.name);
+  if (nameScore(best, phoneDigits) <= 0 || best === clean(base.name)) return undefined;
+  return best;
+}
+
+/**
+ * Decide como ligar a identidade a um único contato do Chatwoot sem perder o vínculo.
+ *
+ * Todos os cadastros da mesma pessoa (criados com o LID, pelo atendente com o 9º dígito
+ * trocado, ou pela Evolution) são mesclados na base eleita. Depois a base recebe o melhor
+ * nome, o identifier canônico (o JID que o WhatsApp devolve) e o telefone em E.164 com o
+ * 9 — o formato que o atendente procura, para ele achar o contato e não criar outro.
+ * Sem cadastro, cria pelo número; sem número, pelo LID e sem telefone.
+ */
+export function planContactLink(identity: ContactIdentity, candidates: ChatwootContactRef[] = []): ContactLinkPlan {
+  const base = electBaseContact(candidates);
+
+  if (!base) {
+    return identity.pnJid
+      ? { action: 'create', identifier: identity.pnJid, phoneNumber: displayPhone(identity.pnJid) }
+      : { action: 'create', identifier: identity.lidJid };
   }
+
+  const update: ContactUpdate = {};
+
+  const name = consolidatedName(base, candidates, identityPhoneDigits(identity));
+  if (name) update.name = name;
 
   if (identity.pnJid) {
-    return { action: 'create', identifier: identity.pnJid, phoneNumber: displayPhone(identity.pnJid) };
+    if (base.identifier !== identity.pnJid) update.identifier = identity.pnJid;
+    const phone = displayPhone(identity.pnJid);
+    if (base.phone_number !== phone) update.phone_number = phone;
+  } else if (!clean(base.identifier)) {
+    // Sem número conhecido: o LID vira o identifier, mas nunca o telefone.
+    update.identifier = identity.lidJid;
   }
-  return { action: 'create', identifier: identity.lidJid };
+
+  return {
+    action: 'link',
+    baseId: base.id,
+    mergeIds: candidates.filter((contact) => contact.id !== base.id).map((contact) => contact.id),
+    update: Object.keys(update).length ? update : undefined,
+  };
 }
 
 /**
