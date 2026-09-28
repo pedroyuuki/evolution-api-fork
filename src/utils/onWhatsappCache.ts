@@ -1,63 +1,10 @@
 import { prismaRepository } from '@api/server.module';
 import { configService, Database } from '@config/env.config';
 import { Logger } from '@config/logger.config';
+import { chooseLidValue, dedupePairs, getAvailableNumbers, isRealLidJid, LidPnPair } from '@utils/jidIdentity';
 import dayjs from 'dayjs';
 
 const logger = new Logger('OnWhatsappCache');
-
-function getAvailableNumbers(remoteJid: string) {
-  const numbersAvailable: string[] = [];
-
-  if (remoteJid.startsWith('+')) {
-    remoteJid = remoteJid.slice(1);
-  }
-
-  const [number, domain] = remoteJid.split('@');
-
-  // TODO: Se já for @lid, retornar apenas ele mesmo SEM adicionar @domain novamente
-  if (domain === 'lid' || domain === 'g.us') {
-    return [remoteJid]; // Retorna direto para @lid e @g.us
-  }
-
-  // Brazilian numbers
-  if (remoteJid.startsWith('55')) {
-    const numberWithDigit =
-      number.slice(4, 5) === '9' && number.length === 13 ? number : `${number.slice(0, 4)}9${number.slice(4)}`;
-    const numberWithoutDigit = number.length === 12 ? number : number.slice(0, 4) + number.slice(5);
-
-    numbersAvailable.push(numberWithDigit);
-    numbersAvailable.push(numberWithoutDigit);
-  }
-
-  // Mexican/Argentina numbers
-  // Ref: https://faq.whatsapp.com/1294841057948784
-  else if (number.startsWith('52') || number.startsWith('54')) {
-    let prefix = '';
-    if (number.startsWith('52')) {
-      prefix = '1';
-    }
-    if (number.startsWith('54')) {
-      prefix = '9';
-    }
-
-    const numberWithDigit =
-      number.slice(2, 3) === prefix && number.length === 13
-        ? number
-        : `${number.slice(0, 2)}${prefix}${number.slice(2)}`;
-    const numberWithoutDigit = number.length === 12 ? number : number.slice(0, 2) + number.slice(3);
-
-    numbersAvailable.push(numberWithDigit);
-    numbersAvailable.push(numberWithoutDigit);
-  }
-
-  // Other countries
-  else {
-    numbersAvailable.push(remoteJid);
-  }
-
-  // TODO: Adiciona @domain apenas para números que não são @lid
-  return numbersAvailable.map((number) => `${number}@${domain}`);
-}
 
 interface ISaveOnWhatsappCacheParams {
   remoteJid: string;
@@ -126,7 +73,14 @@ export async function saveOnWhatsappCache(data: ISaveOnWhatsappCacheParams[]) {
       // Ordena os JIDs para garantir consistência na string final
       const sortedJidOptions = [...finalJidOptions].sort();
       const newJidOptionsString = sortedJidOptions.join(',');
-      const newLid = item.lid === 'lid' || item.remoteJid?.includes('@lid') ? 'lid' : null;
+      // A coluna passa a guardar o LID real quando ele vem na gravação, e um LID real já
+      // aprendido nunca é trocado por flag ou null — antes, qualquer mensagem sem LID
+      // apagava o valor e o par se perdia.
+      const newLid = chooseLidValue({
+        incoming: [remoteJid, altJidNormalized].find((jid) => isRealLidJid(jid)),
+        existing: existingRecord?.lid,
+        lidAddressed: item.lid === 'lid' || item.remoteJid?.includes('@lid'),
+      });
 
       const dataPayload = {
         remoteJid: remoteJid,
@@ -208,4 +162,54 @@ export async function getOnWhatsappCache(remoteJids: string[]) {
   }
 
   return results;
+}
+
+/**
+ * Grava pares LID↔número na coluna IsOnWhatsapp.lid, na linha do número.
+ *
+ * É o espelho durável do armazenamento de mapeamentos do Baileys, que vive no estado de
+ * autenticação e é apagado no logout. Os pares chegam do sync de histórico, das chaves
+ * das mensagens e do evento lid-mapping.update. O par é um fato estável do usuário, então
+ * aqui não há validade por data como no cache de "está no WhatsApp".
+ *
+ * A linha é localizada pelo número exato ou por uma das suas variações (9º dígito), com
+ * comparação exata depois da busca: o `contains` sozinho casaria um número que é sufixo
+ * de outro (ex.: 554497091885 dentro de 1554497091885).
+ */
+export async function saveLidPnMappings(pairs: LidPnPair[]): Promise<void> {
+  if (!configService.get<Database>('DATABASE').SAVE_DATA.IS_ON_WHATSAPP) {
+    return;
+  }
+
+  for (const { lid, pn } of dedupePairs(pairs)) {
+    try {
+      const variants = getAvailableNumbers(pn);
+
+      const candidates = await prismaRepository.isOnWhatsapp.findMany({
+        where: {
+          OR: [{ remoteJid: pn }, ...variants.map((jid) => ({ jidOptions: { contains: jid } }))],
+        },
+      });
+
+      const record = candidates.find(
+        (row) => row.remoteJid === pn || row.jidOptions.split(',').some((jid) => variants.includes(jid)),
+      );
+
+      if (record) {
+        if (record.lid !== lid) {
+          await prismaRepository.isOnWhatsapp.update({ where: { id: record.id }, data: { lid } });
+          logger.verbose(`[saveLidPnMappings] ${lid} -> ${record.remoteJid}`);
+        }
+        continue;
+      }
+
+      await prismaRepository.isOnWhatsapp.create({
+        data: { remoteJid: pn, jidOptions: [...new Set(variants)].sort().join(','), lid },
+      });
+      logger.verbose(`[saveLidPnMappings] ${lid} -> ${pn} (novo)`);
+    } catch (error) {
+      // Perder um par aqui não é grave: ele volta na próxima mensagem ou sync desse contato.
+      logger.warn(`[saveLidPnMappings] Falha ao gravar ${lid} -> ${pn}: ${error?.message ?? error}`);
+    }
+  }
 }

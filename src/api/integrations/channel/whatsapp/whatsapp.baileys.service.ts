@@ -81,8 +81,9 @@ import { createId as cuid } from '@paralleldrive/cuid2';
 import { Instance, Message } from '@prisma/client';
 import { createJid } from '@utils/createJid';
 import { fetchLatestWaWebVersion } from '@utils/fetchLatestWaWebVersion';
+import { extractLidPnPairs, LidPnPair } from '@utils/jidIdentity';
 import { makeProxyAgent, makeProxyAgentUndici } from '@utils/makeProxyAgent';
-import { getOnWhatsappCache, saveOnWhatsappCache } from '@utils/onWhatsappCache';
+import { getOnWhatsappCache, saveLidPnMappings, saveOnWhatsappCache } from '@utils/onWhatsappCache';
 import { decideReconnect } from '@utils/reconnectPolicy';
 import { status } from '@utils/renderStatus';
 import { sendTelemetry } from '@utils/sendTelemetry';
@@ -1070,6 +1071,7 @@ export class BaileysStartupService extends ChannelStartupService {
       isLatest,
       progress,
       syncType,
+      lidPnMappings,
     }: {
       chats: Chat[];
       contacts: Contact[];
@@ -1077,8 +1079,16 @@ export class BaileysStartupService extends ChannelStartupService {
       isLatest?: boolean;
       progress?: number;
       syncType?: proto.HistorySync.HistorySyncType;
+      lidPnMappings?: LidPnPair[];
     }) => {
       try {
+        // O sync de histórico é a fonte com mais pares: o WhatsApp manda
+        // phoneNumberToLidMappings e o Baileys (rc10+) os repassa aqui. Só lidPnMappings é
+        // usado: nos contatos do histórico o Baileys preenche lid com
+        // `chat.lidJid || chat.accountLid`, e o próprio Baileys não usa o accountLid como
+        // par — derivar pares dali poderia ligar o número do contato ao LID errado.
+        this.persistLidPnPairs(lidPnMappings ?? []);
+
         if (syncType === proto.HistorySync.HistorySyncType.ON_DEMAND) {
           console.log('received on-demand history sync, messages=', messages);
         }
@@ -1223,6 +1233,11 @@ export class BaileysStartupService extends ChannelStartupService {
       settings: any,
     ) => {
       try {
+        // Pares LID↔número desta leva, colhidos ANTES de qualquer mutação da chave (mais
+        // abaixo o remoteJid é trocado pelo Alt e o LID se perde). Sem await: gravar o par
+        // não pode atrasar a entrega da mensagem.
+        this.persistLidPnPairs(messages.flatMap((message) => extractLidPnPairs(message?.key)));
+
         for (const received of messages) {
           if (
             received?.messageStubParameters?.some?.((param) =>
@@ -2027,6 +2042,22 @@ export class BaileysStartupService extends ChannelStartupService {
     },
   };
 
+  /** Grava pares LID↔número sem bloquear quem chamou; falha só vira log. */
+  private persistLidPnPairs(pairs: LidPnPair[]) {
+    if (!pairs.length) return;
+
+    saveLidPnMappings(pairs).catch((error) =>
+      this.logger.warn(`[${this.instanceName}] Falha ao gravar pares LID/numero: ${error?.message ?? error}`),
+    );
+  }
+
+  /** Contatos do Baileys trazem o par em id/lid/phoneNumber; o que não formar par é descartado. */
+  private lidPnPairsFromContacts(contacts: Partial<Contact>[] = []): LidPnPair[] {
+    return contacts.flatMap((contact) =>
+      contact?.id ? [{ lid: contact.lid ?? contact.id, pn: contact.phoneNumber ?? contact.id }] : [],
+    );
+  }
+
   private eventHandler() {
     const socket = this.client;
 
@@ -2142,6 +2173,18 @@ export class BaileysStartupService extends ChannelStartupService {
             if (events['chats.delete']) {
               const payload = events['chats.delete'];
               this.chatHandle['chats.delete'](payload);
+            }
+
+            if (events['lid-mapping.update']) {
+              this.persistLidPnPairs([events['lid-mapping.update']]);
+            }
+
+            if (events['contacts.upsert']) {
+              this.persistLidPnPairs(this.lidPnPairsFromContacts(events['contacts.upsert']));
+            }
+
+            if (events['contacts.update']) {
+              this.persistLidPnPairs(this.lidPnPairsFromContacts(events['contacts.update']));
             }
 
             if (events['contacts.upsert']) {
@@ -3748,7 +3791,9 @@ export class BaileysStartupService extends ChannelStartupService {
             true,
             user.number,
             contacts.find((c) => c.remoteJid === cached.remoteJid)?.pushName,
-            cached.lid || (cached.remoteJid.includes('@lid') ? 'lid' : undefined),
+            // A coluna lid pode guardar o LID real; a resposta da API mantém a flag 'lid'
+            // de sempre para não mudar o contrato de quem consome /chat/whatsappNumbers.
+            cached.lid || cached.remoteJid.includes('@lid') ? 'lid' : undefined,
           );
         }
 

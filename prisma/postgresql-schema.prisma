@@ -663,6 +663,8 @@ model IsOnWhatsapp {
   lid        String?  @db.VarChar(100)
   createdAt  DateTime @default(now()) @db.Timestamp
   updatedAt  DateTime @updatedAt @db.Timestamp
+
+  @@index([lid])
 }
 
 model N8n {
