@@ -12,6 +12,9 @@ WORKDIR /evolution
 COPY ./package*.json ./
 COPY ./tsconfig.json ./
 COPY ./tsup.config.ts ./
+# Precisa existir antes do npm ci: o postinstall (patch-package) aplica os patches de
+# node_modules, para a imagem ter as mesmas dependências do ambiente de desenvolvimento.
+COPY ./patches ./patches
 
 RUN npm ci --silent
 
