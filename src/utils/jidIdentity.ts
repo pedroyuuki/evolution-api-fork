@@ -1,4 +1,4 @@
-import { isLidUser, isPnUser, jidNormalizedUser } from 'baileys';
+import { isJidGroup, isLidUser, isPnUser, jidNormalizedUser } from 'baileys';
 
 /**
  * Par de identidades do mesmo usuário do WhatsApp: o LID (identificador que esconde o
@@ -12,6 +12,7 @@ type KeyLike = {
   remoteJidAlt?: string | null;
   participant?: string | null;
   participantAlt?: string | null;
+  addressingMode?: string | null;
 };
 
 const LEGACY_LID_FLAG = 'lid';
@@ -67,6 +68,78 @@ export function dedupePairs(pairs: LidPnPair[]): LidPnPair[] {
     }
   }
   return [...byLid.values()];
+}
+
+/**
+ * LIDs de uma chave que precisam ser buscados fora dela: os que chegam sem o número no
+ * campo Alt. Em conversa individual olha remoteJid; em grupo, o participant.
+ */
+export function lidsNeedingResolution(key?: KeyLike | null): string[] {
+  if (!key) return [];
+
+  const [primary, alt] = isJidGroup(key.remoteJid ?? undefined)
+    ? [key.participant, key.participantAlt]
+    : [key.remoteJid, key.remoteJidAlt];
+
+  const lid = normalizeUserJid(primary);
+  const pn = normalizeUserJid(alt);
+
+  return lid && isLidUser(lid) && !(pn && isPnUser(pn)) ? [lid] : [];
+}
+
+/**
+ * Devolve uma cópia da chave na identidade canônica: o número no campo principal e o LID
+ * no Alt, com addressingMode 'pn' — o mesmo "swap recíproco" do upstream. Em grupo a
+ * troca é no participant; o JID do grupo nunca muda.
+ *
+ * O número vem do Alt da própria chave ou, quando falta, de `pnByLid` (banco/Baileys).
+ * Sem número conhecido a chave volta intacta, inclusive o addressingMode.
+ *
+ * Nunca altera a chave recebida: a original ainda é usada em chamadas de protocolo
+ * (confirmação de leitura, download de mídia), que precisam dela como o WhatsApp mandou.
+ */
+export function canonicalizeKey<T extends KeyLike>(key: T, pnByLid: ReadonlyMap<string, string> = new Map()): T {
+  if (!key) return key;
+
+  const canonical: T = { ...key };
+  const [primaryField, altField] = isJidGroup(key.remoteJid ?? undefined)
+    ? (['participant', 'participantAlt'] as const)
+    : (['remoteJid', 'remoteJidAlt'] as const);
+
+  const lid = normalizeUserJid(key[primaryField]);
+  if (!lid || !isLidUser(lid)) return canonical;
+
+  const alt = normalizeUserJid(key[altField]);
+  const pn = alt && isPnUser(alt) ? alt : pnByLid.get(lid);
+  if (!pn) return canonical;
+
+  canonical[primaryField] = pn;
+  canonical[altField] = lid;
+  canonical.addressingMode = 'pn';
+
+  return canonical;
+}
+
+/**
+ * O que gravar na linha do número ao aprender o par (lid, número).
+ *
+ * A coluna `lid` guarda um LID por número, mas um mesmo número pode ter mais de um (visto
+ * no QA: 555197821273 com dois). O primeiro LID real fica na coluna e os demais vão só
+ * para `jidOptions`, onde o cache de "está no WhatsApp" já guardava LIDs — sobrescrever a
+ * coluna faria os dois LIDs alternarem e um deles sempre ficaria sem resolução.
+ *
+ * Devolve undefined no campo que não precisa mudar.
+ */
+export function planLidMappingUpdate(
+  record: { lid?: string | null; jidOptions?: string | null },
+  lid: string,
+): { lid: string | undefined; jidOptions: string | undefined } {
+  const options = new Set((record.jidOptions ?? '').split(',').filter(Boolean));
+  const optionsChange = options.has(lid) ? undefined : [...options.add(lid)].sort().join(',');
+
+  const lidChange = isRealLidJid(record.lid) ? undefined : lid;
+
+  return { lid: lidChange, jidOptions: optionsChange };
 }
 
 /**

@@ -1,7 +1,14 @@
 import { prismaRepository } from '@api/server.module';
 import { configService, Database } from '@config/env.config';
 import { Logger } from '@config/logger.config';
-import { chooseLidValue, dedupePairs, getAvailableNumbers, isRealLidJid, LidPnPair } from '@utils/jidIdentity';
+import {
+  chooseLidValue,
+  dedupePairs,
+  getAvailableNumbers,
+  isRealLidJid,
+  LidPnPair,
+  planLidMappingUpdate,
+} from '@utils/jidIdentity';
 import dayjs from 'dayjs';
 
 const logger = new Logger('OnWhatsappCache');
@@ -196,15 +203,24 @@ export async function saveLidPnMappings(pairs: LidPnPair[]): Promise<void> {
       );
 
       if (record) {
-        if (record.lid !== lid) {
-          await prismaRepository.isOnWhatsapp.update({ where: { id: record.id }, data: { lid } });
+        // Um número pode ter mais de um LID: o primeiro fica na coluna e os demais em
+        // jidOptions (ver planLidMappingUpdate).
+        const plan = planLidMappingUpdate(record, lid);
+        if (plan.lid !== undefined || plan.jidOptions !== undefined) {
+          await prismaRepository.isOnWhatsapp.update({
+            where: { id: record.id },
+            data: {
+              ...(plan.lid !== undefined && { lid: plan.lid }),
+              ...(plan.jidOptions !== undefined && { jidOptions: plan.jidOptions }),
+            },
+          });
           logger.verbose(`[saveLidPnMappings] ${lid} -> ${record.remoteJid}`);
         }
         continue;
       }
 
       await prismaRepository.isOnWhatsapp.create({
-        data: { remoteJid: pn, jidOptions: [...new Set(variants)].sort().join(','), lid },
+        data: { remoteJid: pn, jidOptions: [...new Set([...variants, lid])].sort().join(','), lid },
       });
       logger.verbose(`[saveLidPnMappings] ${lid} -> ${pn} (novo)`);
     } catch (error) {
@@ -212,4 +228,48 @@ export async function saveLidPnMappings(pairs: LidPnPair[]): Promise<void> {
       logger.warn(`[saveLidPnMappings] Falha ao gravar ${lid} -> ${pn}: ${error?.message ?? error}`);
     }
   }
+}
+
+/**
+ * Números conhecidos para os LIDs informados, a partir da coluna IsOnWhatsapp.lid
+ * (indexada). Sem filtro de validade por data: o par LID↔número é estável.
+ */
+export async function getPnsForLids(lids: string[]): Promise<Map<string, string>> {
+  const result = new Map<string, string>();
+  const wanted = [...new Set(lids.filter((lid) => isRealLidJid(lid)))];
+
+  if (!wanted.length || !configService.get<Database>('DATABASE').SAVE_DATA.IS_ON_WHATSAPP) {
+    return result;
+  }
+
+  const rows = await prismaRepository.isOnWhatsapp.findMany({
+    where: { lid: { in: wanted } },
+    select: { remoteJid: true, lid: true },
+  });
+
+  for (const row of rows) {
+    if (row.lid && !row.remoteJid.endsWith('@lid')) {
+      result.set(row.lid, row.remoteJid);
+    }
+  }
+
+  // LIDs adicionais do mesmo número ficam em jidOptions. Só os que sobraram da busca pela
+  // coluna indexada chegam aqui, e comparamos de forma exata depois do contains.
+  const remaining = wanted.filter((lid) => !result.has(lid));
+  if (remaining.length) {
+    const byOptions = await prismaRepository.isOnWhatsapp.findMany({
+      where: { OR: remaining.map((lid) => ({ jidOptions: { contains: lid } })) },
+      select: { remoteJid: true, jidOptions: true },
+    });
+
+    for (const row of byOptions) {
+      if (row.remoteJid.endsWith('@lid')) continue;
+      const options = row.jidOptions.split(',');
+      for (const lid of remaining) {
+        if (options.includes(lid)) result.set(lid, row.remoteJid);
+      }
+    }
+  }
+
+  return result;
 }

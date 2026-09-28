@@ -81,9 +81,9 @@ import { createId as cuid } from '@paralleldrive/cuid2';
 import { Instance, Message } from '@prisma/client';
 import { createJid } from '@utils/createJid';
 import { fetchLatestWaWebVersion } from '@utils/fetchLatestWaWebVersion';
-import { extractLidPnPairs, LidPnPair } from '@utils/jidIdentity';
+import { canonicalizeKey, dedupePairs, extractLidPnPairs, LidPnPair, lidsNeedingResolution } from '@utils/jidIdentity';
 import { makeProxyAgent, makeProxyAgentUndici } from '@utils/makeProxyAgent';
-import { getOnWhatsappCache, saveLidPnMappings, saveOnWhatsappCache } from '@utils/onWhatsappCache';
+import { getOnWhatsappCache, getPnsForLids, saveLidPnMappings, saveOnWhatsappCache } from '@utils/onWhatsappCache';
 import { decideReconnect } from '@utils/reconnectPolicy';
 import { status } from '@utils/renderStatus';
 import { sendTelemetry } from '@utils/sendTelemetry';
@@ -1089,6 +1089,22 @@ export class BaileysStartupService extends ChannelStartupService {
         // par — derivar pares dali poderia ligar o número do contato ao LID errado.
         this.persistLidPnPairs(lidPnMappings ?? []);
 
+        // Chats e mensagens do histórico chegam só com o LID (a chave não traz Alt nem
+        // addressingMode). Resolve com os pares deste mesmo evento e, para o que sobrar,
+        // com o banco e o Baileys — senão cada pareamento grava de novo chats e mensagens
+        // sob o LID, e eles não se juntam aos que já existem sob o número.
+        const historyPnByLid = new Map(dedupePairs(lidPnMappings ?? []).map((pair) => [pair.lid, pair.pn]));
+        const historyPending = [
+          ...chats.flatMap((chat) => lidsNeedingResolution({ remoteJid: chat.id })),
+          ...messages.flatMap((message) => lidsNeedingResolution(message?.key)),
+        ].filter((lid) => !historyPnByLid.has(lid));
+        if (historyPending.length) {
+          for (const [lid, pn] of await this.resolvePnsForLids(historyPending)) {
+            historyPnByLid.set(lid, pn);
+          }
+        }
+        const historyChatJid = (jid: string) => canonicalizeKey({ remoteJid: jid }, historyPnByLid).remoteJid;
+
         if (syncType === proto.HistorySync.HistorySyncType.ON_DEMAND) {
           console.log('received on-demand history sync, messages=', messages);
         }
@@ -1131,11 +1147,15 @@ export class BaileysStartupService extends ChannelStartupService {
         );
 
         for (const chat of chats) {
-          if (chatsRepository?.has(chat.id)) {
+          const chatJid = historyChatJid(chat.id);
+          if (chatsRepository?.has(chatJid)) {
             continue;
           }
 
-          chatsRaw.push({ remoteJid: chat.id, instanceId: this.instanceId, name: chat.name });
+          // Dois chats do histórico (um pelo LID, outro pelo número) podem virar o mesmo;
+          // o createMany com skipDuplicates grava só um.
+          chatsRepository.add(chatJid);
+          chatsRaw.push({ remoteJid: chatJid, instanceId: this.instanceId, name: chat.name });
         }
 
         this.sendDataWebhook(Events.CHATS_SET, chatsRaw);
@@ -1192,7 +1212,7 @@ export class BaileysStartupService extends ChannelStartupService {
             }
           }
 
-          messagesRaw.push(this.prepareMessage(m));
+          messagesRaw.push(this.prepareMessage(m, canonicalizeKey(m.key, historyPnByLid)));
         }
 
         this.sendDataWebhook(Events.MESSAGES_SET, [...messagesRaw], true, undefined, {
@@ -1329,8 +1349,14 @@ export class BaileysStartupService extends ChannelStartupService {
             continue;
           }
 
+          // Identidade canônica (número em remoteJid, LID em remoteJidAlt), resolvida uma
+          // única vez e usada por tudo que grava ou publica: Chat, Message, Chatwoot,
+          // webhook, chatbots e Contact. received.key segue intacto para as chamadas de
+          // protocolo (confirmação de leitura, reenvio, download de mídia).
+          const identityKey = await this.canonicalKey(received.key);
+
           const existingChat = await this.prismaRepository.chat.findFirst({
-            where: { instanceId: this.instanceId, remoteJid: received.key.remoteJid },
+            where: { instanceId: this.instanceId, remoteJid: identityKey.remoteJid },
             select: { id: true, name: true },
           });
 
@@ -1340,7 +1366,7 @@ export class BaileysStartupService extends ChannelStartupService {
             existingChat.name !== received.pushName &&
             received.pushName.trim().length > 0 &&
             !received.key.fromMe &&
-            !received.key.remoteJid.includes('@g.us')
+            !identityKey.remoteJid.includes('@g.us')
           ) {
             this.sendDataWebhook(Events.CHATS_UPSERT, [{ ...existingChat, name: received.pushName }]);
             if (this.configService.get<Database>('DATABASE').SAVE_DATA.CHATS) {
@@ -1350,12 +1376,12 @@ export class BaileysStartupService extends ChannelStartupService {
                   data: { name: received.pushName },
                 });
               } catch {
-                console.log(`Chat insert record ignored: ${received.key.remoteJid} - ${this.instanceId}`);
+                console.log(`Chat insert record ignored: ${identityKey.remoteJid} - ${this.instanceId}`);
               }
             }
           }
 
-          const messageRaw = this.prepareMessage(received);
+          const messageRaw = this.prepareMessage(received, identityKey);
 
           if (messageRaw.messageType === 'pollUpdateMessage') {
             const pollCreationKey = messageRaw.message.pollUpdateMessage.pollCreationMessageKey;
@@ -1520,7 +1546,7 @@ export class BaileysStartupService extends ChannelStartupService {
             const { pollUpdates, ...messageData } = messageRaw;
             const msg = await this.prismaRepository.message.create({ data: messageData });
 
-            const { remoteJid } = received.key;
+            const { remoteJid } = messageRaw.key;
             const timestamp = msg.messageTimestamp;
             const fromMe = received.key.fromMe.toString();
             const messageKey = `${remoteJid}_${timestamp}_${fromMe}`;
@@ -1642,9 +1668,6 @@ export class BaileysStartupService extends ChannelStartupService {
           this.logger.verbose(messageRaw);
 
           sendTelemetry(`received.message.${messageRaw.messageType ?? 'unknown'}`);
-          if (messageRaw.key.remoteJid?.includes('@lid') && messageRaw.key.remoteJidAlt) {
-            messageRaw.key.remoteJid = messageRaw.key.remoteJidAlt;
-          }
           console.log(messageRaw);
 
           this.sendDataWebhook(Events.MESSAGES_UPSERT, messageRaw);
@@ -1657,7 +1680,7 @@ export class BaileysStartupService extends ChannelStartupService {
           });
 
           const contact = await this.prismaRepository.contact.findFirst({
-            where: { remoteJid: received.key.remoteJid, instanceId: this.instanceId },
+            where: { remoteJid: messageRaw.key.remoteJid, instanceId: this.instanceId },
           });
 
           const contactRaw: {
@@ -1666,9 +1689,9 @@ export class BaileysStartupService extends ChannelStartupService {
             profilePicUrl?: string;
             instanceId: string;
           } = {
-            remoteJid: received.key.remoteJid,
+            remoteJid: messageRaw.key.remoteJid,
             pushName: received.key.fromMe ? '' : received.key.fromMe == null ? '' : received.pushName,
-            profilePicUrl: (await this.profilePicture(received.key.remoteJid)).profilePictureUrl,
+            profilePicUrl: (await this.profilePicture(messageRaw.key.remoteJid)).profilePictureUrl,
             instanceId: this.instanceId,
           };
 
@@ -1677,10 +1700,12 @@ export class BaileysStartupService extends ChannelStartupService {
           }
 
           if (contactRaw.remoteJid.includes('@s.whatsapp') || contactRaw.remoteJid.includes('@lid')) {
+            // Com a chave já canônica, remoteJid é o número (quando conhecido) e
+            // remoteJidAlt o LID. Antes, no modo LID, os dois campos recebiam o número e o
+            // LID nunca chegava ao cache.
             await saveOnWhatsappCache([
               {
-                remoteJid:
-                  messageRaw.key.addressingMode === 'lid' ? messageRaw.key.remoteJidAlt : messageRaw.key.remoteJid,
+                remoteJid: messageRaw.key.remoteJid,
                 remoteJidAlt: messageRaw.key.remoteJidAlt,
                 lid: messageRaw.key.addressingMode === 'lid' ? 'lid' : null,
               },
@@ -1727,10 +1752,15 @@ export class BaileysStartupService extends ChannelStartupService {
 
       const readChatToUpdate: Record<string, true> = {}; // {remoteJid: true}
 
-      for await (const { key, update } of args) {
-        if (settings?.groupsIgnore && key.remoteJid?.includes('@g.us')) {
+      for await (const { key: receivedKey, update } of args) {
+        if (settings?.groupsIgnore && receivedKey.remoteJid?.includes('@g.us')) {
           continue;
         }
+
+        // Mesma identidade canônica do messages.upsert: sem isso a confirmação de entrega
+        // ou leitura chegava com o LID e atualizava um chat diferente do da mensagem.
+        // Aqui não há chamada de protocolo com a chave, então a cópia resolvida basta.
+        const key = await this.canonicalKey(receivedKey);
 
         const updateKey = `${this.instance.id}_${key.id}_${update.status}`;
 
@@ -2041,6 +2071,53 @@ export class BaileysStartupService extends ChannelStartupService {
       });
     },
   };
+
+  /**
+   * Cópia da chave na identidade canônica (número em remoteJid, LID em remoteJidAlt).
+   *
+   * O número vem do Alt da própria chave; quando falta (mensagens do histórico chegam só
+   * com o LID), do nosso banco e em seguida do armazenamento do Baileys. Um par achado só
+   * no Baileys é espelhado no banco na hora, para sobreviver a um logout.
+   */
+  private async canonicalKey<T extends proto.IMessageKey>(key: T): Promise<T> {
+    const pending = lidsNeedingResolution(key);
+    if (!pending.length) {
+      return canonicalizeKey(key);
+    }
+
+    return canonicalizeKey(key, await this.resolvePnsForLids(pending));
+  }
+
+  /**
+   * Números conhecidos para os LIDs informados: primeiro o nosso banco, depois o
+   * armazenamento do Baileys (em lote). O que só o Baileys conhecia é espelhado no banco.
+   */
+  private async resolvePnsForLids(lids: string[]): Promise<Map<string, string>> {
+    const pnByLid = await getPnsForLids(lids).catch(() => new Map<string, string>());
+    const missing = [...new Set(lids)].filter((lid) => !pnByLid.has(lid));
+    if (!missing.length) {
+      return pnByLid;
+    }
+
+    let fromBaileys: LidPnPair[] = [];
+    try {
+      const lidMapping = this.client?.signalRepository?.lidMapping;
+      fromBaileys = dedupePairs(
+        lidMapping?.getPNsForLIDs
+          ? ((await lidMapping.getPNsForLIDs(missing)) ?? [])
+          : await Promise.all(missing.map(async (lid) => ({ lid, pn: await lidMapping?.getPNForLID(lid) }))),
+      );
+    } catch {
+      // Sem pares no Baileys: esses LIDs seguem sem resolução.
+    }
+
+    for (const pair of fromBaileys) {
+      pnByLid.set(pair.lid, pair.pn);
+    }
+    this.persistLidPnPairs(fromBaileys);
+
+    return pnByLid;
+  }
 
   /** Grava pares LID↔número sem bloquear quem chamou; falha só vira log. */
   private persistLidPnPairs(pairs: LidPnPair[]) {
@@ -2630,7 +2707,7 @@ export class BaileysStartupService extends ChannelStartupService {
         messageSent.messageTimestamp = messageSent.messageTimestamp?.toNumber();
       }
 
-      const messageRaw = this.prepareMessage(messageSent);
+      const messageRaw = this.prepareMessage(messageSent, await this.canonicalKey(messageSent.key));
 
       const isMedia =
         messageSent?.message?.imageMessage ||
@@ -4864,17 +4941,17 @@ export class BaileysStartupService extends ChannelStartupService {
     return obj;
   }
 
-  private prepareMessage(message: proto.IWebMessageInfo): any {
+  private prepareMessage(message: proto.IWebMessageInfo, key: proto.IMessageKey = message.key): any {
     const contentType = getContentType(message.message);
     const contentMsg = message?.message[contentType] as any;
 
     const messageRaw = {
-      key: message.key, // Save key exactly as it comes from Baileys
+      // Sempre uma cópia: antes era a mesma referência do objeto do Baileys, e mutar o
+      // messageRaw.key alterava também o received.key usado nas chamadas de protocolo.
+      key: { ...key },
       pushName:
         message.pushName ||
-        (message.key.fromMe
-          ? 'Você'
-          : message?.participant || (message.key?.participant ? message.key.participant.split('@')[0] : null)),
+        (key.fromMe ? 'Você' : message?.participant || (key?.participant ? key.participant.split('@')[0] : null)),
       status: status[message.status],
       message: this.deserializeMessageBuffers({ ...message.message }),
       contextInfo: this.deserializeMessageBuffers(contentMsg?.contextInfo),
