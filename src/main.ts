@@ -2,25 +2,18 @@
 import '@utils/instrumentSentry';
 
 // Now import other modules
+import { chatwootWebhookDispatcher } from '@api/integrations/chatbot/chatwoot/chatwoot-webhook';
 import { ProviderFiles } from '@api/provider/sessions';
 import { PrismaRepository } from '@api/repository/repository.service';
 import { HttpStatus, router } from '@api/routes/index.router';
 import { eventManager, waMonitor } from '@api/server.module';
-import {
-  Auth,
-  configService,
-  Cors,
-  HttpServer,
-  ProviderSession,
-  Sentry as SentryConfig,
-  Webhook,
-} from '@config/env.config';
+import { configService, Cors, HttpServer, ProviderSession, Sentry as SentryConfig } from '@config/env.config';
 import { onUnexpectedError } from '@config/error.config';
 import { Logger } from '@config/logger.config';
 import { ROOT_DIR } from '@config/path.config';
 import * as Sentry from '@sentry/node';
+import { reportHttpError } from '@utils/reportError';
 import { ServerUP } from '@utils/server-up';
-import axios from 'axios';
 import compression from 'compression';
 import cors from 'cors';
 import express, { json, NextFunction, Request, Response, urlencoded } from 'express';
@@ -75,37 +68,9 @@ async function bootstrap() {
   app.use(
     (err: Error, req: Request, res: Response, next: NextFunction) => {
       if (err) {
-        const webhook = configService.get<Webhook>('WEBHOOK');
-
-        if (webhook.EVENTS.ERRORS_WEBHOOK && webhook.EVENTS.ERRORS_WEBHOOK != '' && webhook.EVENTS.ERRORS) {
-          const tzoffset = new Date().getTimezoneOffset() * 60000; //offset in milliseconds
-          const localISOTime = new Date(Date.now() - tzoffset).toISOString();
-          const now = localISOTime;
-          const globalApiKey = configService.get<Auth>('AUTHENTICATION').API_KEY.KEY;
-          const serverUrl = configService.get<HttpServer>('SERVER').URL;
-
-          const errorData = {
-            event: 'error',
-            data: {
-              error: err['error'] || 'Internal Server Error',
-              message: err['message'] || 'Internal Server Error',
-              status: err['status'] || 500,
-              response: {
-                message: err['message'] || 'Internal Server Error',
-              },
-            },
-            date_time: now,
-            api_key: globalApiKey,
-            server_url: serverUrl,
-          };
-
-          logger.error(errorData);
-
-          const baseURL = webhook.EVENTS.ERRORS_WEBHOOK;
-          const httpService = axios.create({ baseURL });
-
-          httpService.post('', errorData);
-        }
+        // Sentry e ERRORS_WEBHOOK. O handler do Sentry registrado abaixo nunca recebia estes
+        // erros: este middleware responde e não repassa o erro adiante.
+        reportHttpError(err);
 
         return res.status(err['status'] || 500).json({
           status: err['status'] || 500,
@@ -163,7 +128,55 @@ async function bootstrap() {
     logger.error('Error loading instances: ' + error);
   });
 
+  // Webhooks do Chatwoot que um processo anterior aceitou e não terminou (deploy, queda):
+  // são retomados assim que cada instância conectar.
+  chatwootWebhookDispatcher
+    ?.recover()
+    .then((count) => count && logger.info(`Chatwoot: ${count} webhook(s) pendente(s) retomado(s)`))
+    .catch((error) => logger.error(`Chatwoot: falha ao retomar webhooks pendentes: ${error}`));
+
+  registerGracefulShutdown(logger);
+
   onUnexpectedError();
+}
+
+/** Prazo para terminar o trabalho em andamento: abaixo dos 10s do docker stop. */
+const SHUTDOWN_DRAIN_MS = 8_000;
+
+/**
+ * No SIGTERM (docker stop, deploy) para de aceitar webhooks do Chatwoot e espera os que
+ * estão em andamento. O que não terminar continua gravado no Redis e é retomado ao subir.
+ */
+function registerGracefulShutdown(logger: Logger) {
+  let shuttingDown = false;
+
+  const shutdown = async (signal: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+
+    logger.warn(`${signal} recebido: finalizando`);
+    try {
+      if (chatwootWebhookDispatcher) {
+        const inFlight = chatwootWebhookDispatcher.inFlight;
+        const drained = await chatwootWebhookDispatcher.stop(SHUTDOWN_DRAIN_MS);
+        if (inFlight) {
+          logger.warn(
+            drained
+              ? `Chatwoot: ${inFlight} webhook(s) em andamento concluído(s)`
+              : 'Chatwoot: prazo esgotado; os webhooks restantes serão retomados ao subir',
+          );
+        }
+      }
+      if (configService.get<SentryConfig>('SENTRY').DSN) {
+        await Sentry.close(1_000);
+      }
+    } finally {
+      process.exit(0);
+    }
+  };
+
+  process.once('SIGTERM', () => void shutdown('SIGTERM'));
+  process.once('SIGINT', () => void shutdown('SIGINT'));
 }
 
 bootstrap();

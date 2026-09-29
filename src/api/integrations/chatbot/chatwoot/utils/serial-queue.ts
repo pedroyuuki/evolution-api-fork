@@ -10,17 +10,14 @@ const DEFAULT_MAX_PENDING_PER_KEY = 100;
 /**
  * Fila que executa tasks em série por chave, e em paralelo entre chaves distintas.
  *
- * Usada para processar os webhooks do Chatwoot fora do ciclo da requisição HTTP: o
- * Chatwoot desiste da requisição em 5s e marca a mensagem como falha, mesmo quando o
- * envio deu certo. Respondendo de imediato e enfileirando aqui, o envio deixa de
- * competir com esse timeout, e mensagens de uma mesma conversa continuam saindo na
- * ordem em que o atendente as escreveu.
+ * Base do ChatwootWebhookDispatcher, que processa os webhooks do Chatwoot fora do ciclo
+ * da requisição HTTP, em série por conversa.
  *
  * A cadeia de uma chave nunca rejeita: erro de task, erro do próprio relator de erro e
  * task travada são todos contidos, porque uma cadeia rejeitada engoliria em silêncio
  * todas as mensagens seguintes daquela conversa.
  *
- * A fila vive em memória: envios em voo são perdidos se o processo reiniciar.
+ * A fila vive em memória; a durabilidade entre reinícios é do despachante (Redis).
  */
 export class SerialQueue {
   private readonly chains = new Map<string, Promise<void>>();

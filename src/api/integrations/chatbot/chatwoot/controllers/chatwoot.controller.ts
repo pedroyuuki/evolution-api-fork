@@ -81,4 +81,8 @@ export class ChatwootController {
 
     return this.chatwootService.receiveWebhook(instance, data);
   }
+
+  public async notifyUnsentMessage(instance: InstanceDto, data: any, reason: string) {
+    return this.chatwootService.notifyUnsentMessage(instance, data, reason);
+  }
 }

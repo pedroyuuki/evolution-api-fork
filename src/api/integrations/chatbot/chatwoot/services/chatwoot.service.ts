@@ -36,6 +36,7 @@ import { Chatwoot as ChatwootModel, Contact as ContactModel, Message as MessageM
 import i18next from '@utils/i18n';
 import { isRealLidJid } from '@utils/jidIdentity';
 import { getOnWhatsappCache } from '@utils/onWhatsappCache';
+import { reportBackgroundError } from '@utils/reportError';
 import { sendTelemetry } from '@utils/sendTelemetry';
 import axios from 'axios';
 import { WAMessageContent, WAMessageKey } from 'baileys';
@@ -1608,21 +1609,33 @@ export class ChatwootService {
       });
     }
 
-    client.messages.create({
-      accountId: this.provider.accountId,
-      conversationId: conversation,
-      data: {
-        content,
-        message_type: 'outgoing',
-        private: true,
-      },
-    });
+    await client.messages
+      .create({
+        accountId: this.provider.accountId,
+        conversationId: conversation,
+        data: {
+          content,
+          message_type: 'outgoing',
+          private: true,
+        },
+      })
+      .catch((error) => this.logger.warn(`Falha ao criar a nota de erro na conversa ${conversation}: ${error}`));
+  }
+
+  /**
+   * Avisa o atendente, por nota privada, que uma mensagem dele não foi enviada. Só para
+   * mensagens de saída de verdade: eventos de status e notas não têm o que reenviar.
+   */
+  public async notifyUnsentMessage(instance: InstanceDto, body: any, reason: string) {
+    const isAgentMessage = body?.event === 'message_created' && body?.message_type === 'outgoing' && !body?.private;
+    const conversationId = body?.conversation?.id;
+    if (!isAgentMessage || !conversationId) return;
+
+    await this.onSendMessageError(instance, conversationId, { message: reason });
   }
 
   public async receiveWebhook(instance: InstanceDto, body: any) {
     try {
-      await new Promise((resolve) => setTimeout(resolve, 500));
-
       const client = await this.clientCw(instance);
 
       if (!client) {
@@ -1661,7 +1674,9 @@ export class ChatwootService {
 
       const senderName = body?.conversation?.messages[0]?.sender?.available_name || body?.sender?.name;
       const waInstance = this.waMonitor.waInstances[instance.instanceName];
-      instance.instanceId = waInstance.instanceId;
+      // Opcional: sem a instância a checagem mais abaixo avisa o atendente. Antes este acesso
+      // lançava primeiro e o erro era engolido, sem aviso nenhum.
+      instance.instanceId = waInstance?.instanceId;
 
       if (body.event === 'message_updated' && body.content_attributes?.deleted) {
         const message = await this.prismaRepository.message.findFirst({
@@ -1885,6 +1900,8 @@ export class ChatwootService {
               if (!messageSent && body.conversation?.id) {
                 this.logger.error(`Failed to send text message to ${chatId}: ${this.extractErrorMessage(error)}`);
                 this.onSendMessageError(instance, body.conversation?.id, error);
+                // O atendente já foi avisado: o catch externo não repete a nota.
+                if (error && typeof error === 'object') error.agentNotified = true;
               }
               throw error;
             }
@@ -1956,7 +1973,13 @@ export class ChatwootService {
 
       return { message: 'bot' };
     } catch (error) {
-      this.logger.error(error);
+      // A resposta ao Chatwoot já foi enviada: sem isto o erro só existiria no log.
+      reportBackgroundError(`chatwoot webhook ${instance.instanceName} (${body?.event} ${body?.id})`, error);
+      if (!error?.agentNotified) {
+        await this.notifyUnsentMessage(instance, body, this.extractErrorMessage(error) || 'Erro inesperado').catch(
+          (notifyError) => this.logger.warn(`Falha ao avisar o atendente: ${notifyError?.message ?? notifyError}`),
+        );
+      }
 
       return { message: 'bot' };
     }

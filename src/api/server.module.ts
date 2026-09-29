@@ -47,10 +47,10 @@ import { TemplateService } from './services/template.service';
 
 const logger = new Logger('WA MODULE');
 
-let chatwootCache: CacheService = null;
-if (configService.get<Chatwoot>('CHATWOOT').ENABLED) {
-  chatwootCache = new CacheService(new CacheEngine(configService, ChatwootService.name).getEngine());
-}
+// null com a integração desligada; o despachante de webhooks do Chatwoot usa o mesmo cache.
+export const chatwootCache: CacheService | null = configService.get<Chatwoot>('CHATWOOT').ENABLED
+  ? new CacheService(new CacheEngine(configService, ChatwootService.name).getEngine())
+  : null;
 
 export const cache = new CacheService(new CacheEngine(configService, 'instance').getEngine());
 const baileysCache = new CacheService(new CacheEngine(configService, 'baileys').getEngine());
