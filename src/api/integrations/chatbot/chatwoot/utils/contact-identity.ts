@@ -98,21 +98,32 @@ export function contactLookup(identity: ContactIdentity): { identifiers: string[
   return { identifiers: [...new Set(identifiers)], phones: [...new Set(phones)] };
 }
 
+/** Telefones do número (variantes do 9º dígito), sem os dígitos do LID. */
+function pnPhones(identity: ContactIdentity): string[] {
+  return identity.pnJid ? getAvailableNumbers(identity.pnJid).map((jid) => `+${digitsOf(jid)}`) : [];
+}
+
 /**
- * Um contato achado pela busca só é da mesma pessoa se o identifier estiver vazio ou for
- * um JID dela. Contato com identifier de outra pessoa nunca entra, mesmo com telefone
- * parecido — a busca por telefone é por variante e não pode mesclar gente diferente.
+ * Um contato achado pela busca só é da mesma pessoa se:
+ * - o identifier for um JID dela (número, variante do 9 ou LID); ou
+ * - o identifier estiver vazio e o telefone for dela (cadastro manual do atendente); ou
+ * - o identifier for outro LID e o telefone for o número dela (a mesma pessoa pode ter
+ *   mais de um LID; dígitos de LID como telefone não servem de prova aqui).
+ * Contato com identifier de outra pessoa nunca entra, mesmo com telefone parecido.
  */
 export function sameContactCandidates(identity: ContactIdentity, found: ChatwootContactRef[]): ChatwootContactRef[] {
   const { identifiers, phones } = contactLookup(identity);
+  const numberPhones = pnPhones(identity);
   const byId = new Map<number, ChatwootContactRef>();
 
   for (const contact of found) {
     if (!contact?.id || byId.has(contact.id)) continue;
     const identifier = clean(contact.identifier);
+    const phone = clean(contact.phone_number);
     const matchesIdentifier = identifier && identifiers.includes(identifier);
-    const matchesPhone = !identifier && phones.includes(clean(contact.phone_number));
-    if (matchesIdentifier || matchesPhone) byId.set(contact.id, contact);
+    const matchesPhone = !identifier && phones.includes(phone);
+    const otherLidOfSameNumber = identifier && isLidUser(identifier) && numberPhones.includes(phone);
+    if (matchesIdentifier || matchesPhone || otherLidOfSameNumber) byId.set(contact.id, contact);
   }
 
   return [...byId.values()];
@@ -143,7 +154,7 @@ export function nameScore(name: string | null | undefined, phoneDigits: string[]
   const digits = value.replace(/\D/g, '');
   if (digits.length >= 8) return 0;
   if (phoneDigits.some((phone) => phone && value.includes(phone.slice(-8)))) return 0;
-  if (!/[A-Za-zÀ-ÿ]/.test(value)) return 0;
+  if (!/\p{L}/u.test(value)) return 0;
 
   let score = 1;
   if (/\s/.test(value)) score += 2;
@@ -158,15 +169,17 @@ export function identityPhoneDigits(identity: ContactIdentity): string[] {
 
 /**
  * O melhor nome entre todos os cadastros, independente de qual sobrevive. Empate fica com
- * a base; se nenhum nome for real, mantém o da base. Devolve undefined quando não muda.
+ * a base, depois com o menor id (a ordem da API não é garantida); se nenhum nome for real,
+ * mantém o da base. Devolve undefined quando não muda.
  */
 function consolidatedName(
   base: ChatwootContactRef,
   candidates: ChatwootContactRef[],
   phoneDigits: string[],
 ): string | undefined {
+  const isBase = (contact: ChatwootContactRef) => (contact.id === base.id ? 1 : 0);
   const ranked = [...candidates].sort(
-    (a, b) => nameScore(b.name, phoneDigits) - nameScore(a.name, phoneDigits) || (a.id === base.id ? -1 : 1),
+    (a, b) => nameScore(b.name, phoneDigits) - nameScore(a.name, phoneDigits) || isBase(b) - isBase(a) || a.id - b.id,
   );
   const best = clean(ranked[0]?.name);
   if (nameScore(best, phoneDigits) <= 0 || best === clean(base.name)) return undefined;
@@ -198,8 +211,12 @@ export function planContactLink(identity: ContactIdentity, candidates: ChatwootC
 
   if (identity.pnJid) {
     if (base.identifier !== identity.pnJid) update.identifier = identity.pnJid;
+    // Só normaliza telefone vazio, LID ou variante do próprio número: um telefone diferente
+    // foi posto de propósito pelo atendente (o identifier já garante o vínculo).
     const phone = displayPhone(identity.pnJid);
-    if (base.phone_number !== phone) update.phone_number = phone;
+    const current = clean(base.phone_number);
+    const ownPhone = !current || contactLookup(identity).phones.includes(current);
+    if (ownPhone && current !== phone) update.phone_number = phone;
   } else if (!clean(base.identifier)) {
     // Sem número conhecido: o LID vira o identifier, mas nunca o telefone.
     update.identifier = identity.lidJid;

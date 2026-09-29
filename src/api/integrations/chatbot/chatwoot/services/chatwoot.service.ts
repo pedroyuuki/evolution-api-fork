@@ -322,6 +322,7 @@ export class ChatwootService {
     name?: string,
     avatar_url?: string,
     jid?: string,
+    withPhone = true,
   ) {
     try {
       const client = await this.clientCw(instance);
@@ -341,7 +342,7 @@ export class ChatwootService {
         };
 
         // Dígitos de LID passam na validação de telefone do Chatwoot, mas não são um número.
-        if (!jid?.endsWith('@lid')) {
+        if (withPhone && !jid?.endsWith('@lid')) {
           data['phone_number'] = `+${phoneNumber}`;
         }
       } else {
@@ -374,7 +375,8 @@ export class ChatwootService {
     } catch (error) {
       if ((error.status === 422 || error.response?.status === 422) && jid) {
         this.logger.warn(`Contact with identifier ${jid} creation failed (422). Checking if it already exists...`);
-        const existingContact = await this.findContactByIdentifier(instance, jid);
+        // Busca exata: a busca `q` é por substring e podia devolver outro número.
+        const [existingContact] = await this.findContactsByAttribute('identifier', [jid]);
         if (existingContact) {
           const contactId = existingContact.id;
           await this.addLabelToContact(this.provider.nameInbox, contactId);
@@ -610,6 +612,8 @@ export class ChatwootService {
         // Outro processo pode ter mesclado o mesmo par: refaz a busca uma vez.
         this.logger.warn(`Chatwoot: falha ao mesclar ${mergeId} em ${plan.baseId}, buscando de novo`);
         return this.consolidateContact(instance, identity, false);
+      } else {
+        this.logger.warn(`Chatwoot: falha ao mesclar ${mergeId} em ${plan.baseId}, seguindo com a base`);
       }
     }
 
@@ -637,7 +641,13 @@ export class ChatwootService {
     if (plan.action !== 'create') return null;
 
     const phone = plan.phoneNumber ? plan.phoneNumber.replace('+', '') : plan.identifier.split('@')[0];
-    const created: any = await this.createContact(instance, phone, inboxId, false, name, avatarUrl, plan.identifier);
+    let created: any = await this.createContact(instance, phone, inboxId, false, name, avatarUrl, plan.identifier);
+    if (!created && plan.phoneNumber) {
+      // O telefone é único na conta e pode estar num cadastro de identifier desconhecido:
+      // cria só com o identifier para a mensagem não se perder.
+      this.logger.warn(`Chatwoot: criando ${plan.identifier} sem telefone (${plan.phoneNumber} em uso)`);
+      created = await this.createContact(instance, phone, inboxId, false, name, avatarUrl, plan.identifier, false);
+    }
     return created?.payload?.contact ?? created;
   }
 
@@ -659,7 +669,10 @@ export class ChatwootService {
       const [result] = await waInstance.whatsappNumber({ numbers: [phone] });
       if (!result?.exists) return;
 
-      const cachedLid = (await getOnWhatsappCache([result.jid]))[0]?.lid;
+      // A busca do cache é por substring (5544... casa com 55544...): confere a linha exata.
+      const cachedLid = (await getOnWhatsappCache([result.jid])).find(
+        (row) => row.remoteJid === result.jid || row.jidOptions.includes(result.jid),
+      )?.lid;
       const identity = contactIdentityFromJids(result.jid, isRealLidJid(cachedLid) ? cachedLid : undefined);
       if (!identity?.pnJid) return;
 
@@ -827,8 +840,10 @@ export class ChatwootService {
         }
         // Conversa em cache de um contato ainda pelo LID (ou sem identifier): passa pelo
         // vínculo uma vez para religar/mesclar. O cache fica no Redis e sobrevive a deploys.
+        // Só com o número conhecido: com LID sozinho não há para onde religar, e a busca
+        // não acharia o contato já religado ao número (criaria um duplicado pelo LID).
         const cachedIdentifier = conversationExists.meta?.sender?.identifier;
-        if (identity && cachedIdentifier !== identity.primaryJid) {
+        if (identity?.pnJid && cachedIdentifier !== identity.pnJid) {
           this.logger.verbose(`Cached conversation belongs to ${cachedIdentifier}, relinking ${remoteJid}`);
           await this.cache.delete(cacheKey);
           return await this.createConversation(instance, body);
@@ -1634,7 +1649,7 @@ export class ChatwootService {
       }
 
       const chatId =
-        body.conversation.meta.sender?.identifier || body.conversation.meta.sender?.phone_number.replace('+', '');
+        body.conversation.meta.sender?.identifier || body.conversation.meta.sender?.phone_number?.replace('+', '');
       // Chatwoot to Whatsapp
       const messageReceived = body.content
         ? body.content
@@ -1773,7 +1788,7 @@ export class ChatwootService {
         }
 
         const conversationSender = body.conversation.meta?.sender;
-        if (conversationSender && !conversationSender.identifier && !chatId.includes('@')) {
+        if (conversationSender && !conversationSender.identifier && chatId && !chatId.includes('@')) {
           await this.linkContactCreatedByAgent(instance, waInstance, chatId, body.conversation.id);
         }
 

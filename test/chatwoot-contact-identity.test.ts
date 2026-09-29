@@ -68,10 +68,13 @@ function candidatesExcludeContactsOfOtherPeople() {
     { id: 7, identifier: '5511999990000@s.whatsapp.net', phone_number: '+5544997091885' }, // outra pessoa
     { id: 8, identifier: '', phone_number: '+5511999990000' }, // veio na busca mas é outro telefone
     { id: 3, identifier: PN, phone_number: '+554497091885' }, // repetido pelas duas buscas
+    { id: 10, identifier: '132328009502871@lid', phone_number: '+5544997091885' }, // outro LID do mesmo número
+    { id: 11, identifier: '999999999999999@lid', phone_number: '+85049596768352' }, // LID alheio com telefone-LID
+    { id: 12, identifier: '5554497091885@s.whatsapp.net', phone_number: null }, // contém o JID como substring
   ];
   assert.deepEqual(
     sameContactCandidates(IDENTITY, found).map((c) => c.id),
-    [3, 9, 2],
+    [3, 9, 2, 10],
   );
 }
 
@@ -93,6 +96,25 @@ function nameScoreRejectsPlaceholders() {
   assert.equal(nameScore('+-()', PHONES), 0, 'sem letras');
   assert.ok(nameScore('Miguel Harinton Leiria Neto', PHONES) > nameScore('Miguel', PHONES));
   assert.ok(nameScore('Miguel', PHONES) > 0);
+  assert.ok(nameScore('Иван Петров', PHONES) > 0, 'letras de qualquer alfabeto contam');
+  assert.equal(nameScore('85049596768352@lid', PHONES), 0, 'pushName que vem como LID no reenvio');
+}
+
+function unrelatedPhoneChosenByAgentIsKept() {
+  // Identifier já garante o vínculo; um telefone diferente foi posto de propósito.
+  const plan = planContactLink(IDENTITY, [{ id: 3, identifier: PN, phone_number: '+554430281234', name: 'Pedro' }]);
+  assert.deepEqual(plan, { action: 'link', baseId: 3, mergeIds: [], update: undefined });
+}
+
+function tiedNamesAmongMergeesAreDeterministic() {
+  const candidates = [
+    { id: 3, identifier: PN, phone_number: '+5544997091885', name: '554497091885', created_at: 1 },
+    { id: 9, phone_number: '+554497091885', name: 'Ana Maria', created_at: 2 },
+    { id: 8, phone_number: '+554497091885', name: 'Bia Souza', created_at: 3 },
+  ];
+  const first = planContactLink(IDENTITY, candidates);
+  const second = planContactLink(IDENTITY, [...candidates].reverse());
+  assert.equal(first.action === 'link' && first.update?.name, second.action === 'link' && second.update?.name);
 }
 
 function manualTwinWithEmailSurvivesAndGetsCanonicalIdentity() {
@@ -193,6 +215,8 @@ const tests = [
   candidatesExcludeContactsOfOtherPeople,
   baseIsContactWithEmailThenOldest,
   nameScoreRejectsPlaceholders,
+  unrelatedPhoneChosenByAgentIsKept,
+  tiedNamesAmongMergeesAreDeterministic,
   manualTwinWithEmailSurvivesAndGetsCanonicalIdentity,
   manualTwinWithoutEmailIsMergedIntoOldestAndNameIsRescued,
   equallyGoodNamesKeepTheBaseName,
