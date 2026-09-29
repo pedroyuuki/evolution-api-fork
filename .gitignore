@@ -45,3 +45,6 @@ lerna-debug.log*
 .tool-versions
 
 /prisma/migrations/*
+
+# Estado local de ferramentas de IDE/agente
+.serena/
