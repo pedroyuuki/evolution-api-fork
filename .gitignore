@@ -48,3 +48,4 @@ lerna-debug.log*
 
 # Estado local de ferramentas de IDE/agente
 .serena/
+.playwright-mcp/
