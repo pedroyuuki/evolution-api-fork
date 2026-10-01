@@ -47,6 +47,7 @@ export class BusinessStartupService extends ChannelStartupService {
   }
 
   public stateConnection: wa.StateConnection = { state: 'open' };
+  private webhookConfigLoaded = false;
 
   public phoneNumber: string;
   public mobile: boolean;
@@ -125,6 +126,13 @@ export class BusinessStartupService extends ChannelStartupService {
   }
 
   public async connectToWhatsapp(data?: any): Promise<any> {
+    // O monitor chama sem dados ao subir a instância. A configuração do webhook (base64)
+    // nunca era carregada neste canal, e o webhook do Cloud API nunca levava base64.
+    if (!this.webhookConfigLoaded) {
+      await this.loadWebhook();
+      this.webhookConfigLoaded = true;
+    }
+
     if (!data) return;
 
     const content = data.entry[0].changes[0].value;
@@ -221,27 +229,42 @@ export class BusinessStartupService extends ChannelStartupService {
     return recipient !== displayPhone && recipient !== phoneNumberId;
   }
 
-  private async downloadMediaMessage(message: any) {
-    try {
-      const id = message[message.type].id;
-      let urlServer = this.configService.get<WaBusiness>('WA_BUSINESS').URL;
-      const version = this.configService.get<WaBusiness>('WA_BUSINESS').VERSION;
-      urlServer = `${urlServer}/${version}/${id}`;
-      const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${this.token}` };
+  /**
+   * Baixa a mídia de uma mensagem recebida: primeiro pede à Meta a URL (vale 5 minutos),
+   * depois baixa o arquivo. Erro de rede, 5xx e 429 são tentados de novo; 4xx não (o id
+   * de mídia recebida pelo webhook expira em 7 dias e aí não há o que tentar).
+   */
+  private async downloadMediaMessage(message: any): Promise<Buffer> {
+    const id = message?.[message?.type]?.id;
+    if (!id) {
+      throw new Error('A mensagem não tem o id de mídia da Meta');
+    }
 
-      // Primeiro, obtenha a URL do arquivo
-      let result = await axios.get(urlServer, { headers });
+    const { URL, VERSION } = this.configService.get<WaBusiness>('WA_BUSINESS');
+    const authorization = { Authorization: `Bearer ${this.token}` };
+    const maxAttempts = 3;
 
-      // Depois, baixe o arquivo usando a URL retornada
-      result = await axios.get(result.data.url, {
-        headers: { Authorization: `Bearer ${this.token}` }, // Use apenas o token de autorização para download
-        responseType: 'arraybuffer',
-      });
-
-      return result.data;
-    } catch (e) {
-      this.logger.error(`Error downloading media: ${e}`);
-      throw e;
+    for (let attempt = 1; ; attempt++) {
+      try {
+        const meta = await axios.get(`${URL}/${VERSION}/${id}`, {
+          headers: { 'Content-Type': 'application/json', ...authorization },
+          timeout: 30_000,
+        });
+        const file = await axios.get(meta.data.url, {
+          headers: authorization,
+          responseType: 'arraybuffer',
+          timeout: 60_000,
+        });
+        return Buffer.from(file.data);
+      } catch (error) {
+        const status = error?.response?.status;
+        const retryable = !status || status >= 500 || status === 429;
+        if (!retryable || attempt >= maxAttempts) {
+          this.logger.error(`Error downloading media ${id} (tentativa ${attempt}): ${error}`);
+          throw error;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1_000 * attempt));
+      }
     }
   }
 
@@ -475,6 +498,8 @@ export class BusinessStartupService extends ChannelStartupService {
 
       if (received.messages) {
         const message = received.messages[0];
+        // Linha da mensagem no banco; o ramo do S3 grava antes e preenche.
+        let storedMessageId: string | undefined;
         const remoteId = this.resolveMessageRemoteId(message, received);
         if (!remoteId) return;
 
@@ -597,6 +622,7 @@ export class BusinessStartupService extends ChannelStartupService {
                 const createdMessage = await this.prismaRepository.message.create({
                   data: messageRaw,
                 });
+                storedMessageId = createdMessage.id;
 
                 await this.prismaRepository.media.create({
                   data: {
@@ -651,19 +677,25 @@ export class BusinessStartupService extends ChannelStartupService {
               this.logger.error(['Error on upload file to minio', error?.message, error?.stack]);
             }
           } else {
-            if (this.localWebhook.enabled && this.localWebhook.webhookBase64) {
-              const buffer = await this.downloadMediaMessage(received?.messages[0]);
-              messageRaw.message.base64 = buffer.toString('base64');
+            const wantsBase64 = Boolean(this.localWebhook.enabled && this.localWebhook.webhookBase64);
+            const wantsTranscription = this.configService.get<Openai>('OPENAI').ENABLED && message.type === 'audio';
+
+            // Uma única ida à Meta, e falha no download não pode derrubar a mensagem: ela
+            // segue para webhook e Chatwoot sem base64 (o endpoint ainda pode buscá-la).
+            let mediaBase64: string | undefined;
+            if (wantsBase64 || wantsTranscription) {
+              try {
+                mediaBase64 = (await this.downloadMediaMessage(received?.messages[0])).toString('base64');
+              } catch (error) {
+                this.logger.error(`Mídia ${key.id} não baixada da Meta: ${error?.message ?? error}`);
+              }
             }
 
-            // Processar OpenAI speech-to-text para áudio mesmo sem S3
-            if (this.configService.get<Openai>('OPENAI').ENABLED && message.type === 'audio') {
-              let openAiBase64 = messageRaw.message.base64;
-              if (!openAiBase64) {
-                const buffer = await this.downloadMediaMessage(received?.messages[0]);
-                openAiBase64 = buffer.toString('base64');
-              }
+            if (wantsBase64 && mediaBase64) {
+              messageRaw.message.base64 = mediaBase64;
+            }
 
+            if (wantsTranscription && mediaBase64) {
               const openAiDefaultSettings = await this.prismaRepository.openaiSetting.findFirst({
                 where: {
                   instanceId: this.instanceId,
@@ -679,7 +711,7 @@ export class BusinessStartupService extends ChannelStartupService {
                     openAiDefaultSettings.OpenaiCreds,
                     {
                       message: {
-                        base64: openAiBase64,
+                        base64: mediaBase64,
                         ...messageRaw,
                       },
                     },
@@ -763,6 +795,18 @@ export class BusinessStartupService extends ChannelStartupService {
 
         sendTelemetry(`received.message.${messageRaw.messageType ?? 'unknown'}`);
 
+        // Grava antes do webhook: quem recebe o evento pode chamar o getBase64FromMediaMessage
+        // na mesma hora, e a mensagem precisa existir. Mídia também é gravada (antes só com
+        // S3), mas sem o base64, que poria vários MB em cada linha.
+        if (!storedMessageId) {
+          // eslint-disable-next-line @typescript-eslint/no-unused-vars
+          const { base64, ...storedContent } = messageRaw.message ?? {};
+          const stored = await this.prismaRepository.message.create({
+            data: { ...messageRaw, message: storedContent },
+          });
+          storedMessageId = stored.id;
+        }
+
         this.sendDataWebhook(Events.MESSAGES_UPSERT, messageRaw);
 
         await chatbotController.emit({
@@ -781,15 +825,18 @@ export class BusinessStartupService extends ChannelStartupService {
 
           if (chatwootSentMessage?.id) {
             messageRaw.chatwootMessageId = chatwootSentMessage.id;
-            messageRaw.chatwootInboxId = chatwootSentMessage.id;
-            messageRaw.chatwootConversationId = chatwootSentMessage.id;
-          }
-        }
+            messageRaw.chatwootInboxId = chatwootSentMessage.inbox_id;
+            messageRaw.chatwootConversationId = chatwootSentMessage.conversation_id;
 
-        if (!this.isMediaMessage(message) && message.type !== 'sticker') {
-          await this.prismaRepository.message.create({
-            data: messageRaw,
-          });
+            await this.prismaRepository.message.update({
+              where: { id: storedMessageId },
+              data: {
+                chatwootMessageId: messageRaw.chatwootMessageId,
+                chatwootInboxId: messageRaw.chatwootInboxId,
+                chatwootConversationId: messageRaw.chatwootConversationId,
+              },
+            });
+          }
         }
 
         const contactPhone = incomingContact?.profile?.phone ?? incomingContact?.wa_id ?? remoteId;
@@ -1774,33 +1821,77 @@ export class BusinessStartupService extends ChannelStartupService {
     });
   }
 
+  /**
+   * Base64 da mídia de uma mensagem. Aceita a mensagem completa (como o webhook entrega) ou
+   * só a chave (`{ message: { key: { id } } }`, como o nó do n8n chama), buscando a mensagem
+   * no banco. Antes só a mensagem completa funcionava, e só com a chave dava TypeError.
+   */
   public async getBase64FromMediaMessage(data: any) {
-    try {
-      const msg = data.message;
-      const messageType = msg.messageType.includes('Message') ? msg.messageType : msg.messageType + 'Message';
-      const mediaMessage = msg.message[messageType];
+    const input = data?.message;
 
-      if (!msg.message?.base64) {
-        const buffer = await this.downloadMediaMessage({ type: messageType, ...msg.message });
-        msg.message.base64 = buffer.toString('base64');
+    let msg: any = input?.message ? input : undefined;
+    if (!msg) {
+      const id = input?.key?.id;
+      if (!id) {
+        throw new BadRequestException('Informe a mensagem completa ou "message.key.id"');
       }
-
-      return {
-        mediaType: msg.messageType,
-        fileName: mediaMessage?.fileName || mediaMessage?.filename,
-        caption: mediaMessage?.caption,
-        size: {
-          fileLength: mediaMessage?.fileLength,
-          height: mediaMessage?.fileLength,
-          width: mediaMessage?.width,
-        },
-        mimetype: mediaMessage?.mime_type,
-        base64: msg.message.base64,
-      };
-    } catch (error) {
-      this.logger.error(error);
-      throw new BadRequestException(error.toString());
+      msg = await this.prismaRepository.message.findFirst({
+        where: { instanceId: this.instanceId, key: { path: ['id'], equals: id } },
+      });
+      if (!msg?.message) {
+        throw new BadRequestException(`Mensagem ${id} não encontrada`);
+      }
     }
+
+    const messageType = this.resolveMediaType(msg);
+    const mediaMessage = messageType ? msg.message[messageType] : undefined;
+    if (!mediaMessage) {
+      throw new BadRequestException('A mensagem não é de mídia');
+    }
+
+    let base64: string | undefined = msg.message.base64;
+    if (!base64) {
+      try {
+        base64 = (await this.downloadMediaMessage({ type: messageType, ...msg.message })).toString('base64');
+      } catch (error) {
+        const status = error?.response?.status;
+        if (status >= 400 && status < 500) {
+          throw new BadRequestException(
+            `A Meta não entregou a mídia (HTTP ${status}). O id de mídia recebida vale 7 dias; ` +
+              'depois disso ela só pode ser obtida de uma cópia própria.',
+          );
+        }
+        this.logger.error(error);
+        throw new BadRequestException(error?.message ?? String(error));
+      }
+    }
+
+    return {
+      mediaType: messageType,
+      fileName: mediaMessage.fileName || mediaMessage.filename,
+      caption: mediaMessage.caption,
+      size: {
+        fileLength: mediaMessage.fileLength ?? mediaMessage.file_size,
+        height: mediaMessage.height,
+        width: mediaMessage.width,
+      },
+      mimetype: mediaMessage.mime_type ?? mediaMessage.mimetype,
+      base64,
+    };
+  }
+
+  /** Tipo da mídia: o messageType gravado, ou a primeira chave de mídia do conteúdo. */
+  private resolveMediaType(msg: any): string | undefined {
+    const declared = msg?.messageType
+      ? msg.messageType.endsWith('Message')
+        ? msg.messageType
+        : `${msg.messageType}Message`
+      : undefined;
+    if (declared && msg.message?.[declared]) return declared;
+
+    return ['imageMessage', 'videoMessage', 'audioMessage', 'documentMessage', 'stickerMessage'].find(
+      (type) => msg.message?.[type],
+    );
   }
 
   public async deleteMessage() {

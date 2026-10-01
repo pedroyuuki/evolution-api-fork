@@ -30,7 +30,7 @@ export class WebhookController extends EventController implements EventControlle
       }
     }
 
-    return this.prisma.webhook.upsert({
+    const saved = await this.prisma.webhook.upsert({
       where: {
         instanceId: this.monitor.waInstances[instanceName].instanceId,
       },
@@ -52,6 +52,12 @@ export class WebhookController extends EventController implements EventControlle
         webhookByEvents: data.webhook.byEvents,
       },
     });
+
+    // A instância decide o base64 pela cópia em memória, que só era lida ao conectar:
+    // mudar a configuração não valia até reiniciar a instância.
+    await this.monitor.waInstances[instanceName]?.loadWebhook?.();
+
+    return saved;
   }
 
   public async emit({

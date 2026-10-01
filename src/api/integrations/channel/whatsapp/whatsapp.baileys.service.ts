@@ -1636,31 +1636,9 @@ export class BaileysStartupService extends ChannelStartupService {
 
           if (this.localWebhook.enabled) {
             if (isMedia && this.localWebhook.webhookBase64) {
-              try {
-                const buffer = await downloadMediaMessage(
-                  { key: received.key, message: received?.message },
-                  'buffer',
-                  {},
-                  { logger: P({ level: 'error' }) as any, reuploadRequest: this.client.updateMediaMessage },
-                );
-
-                if (buffer) {
-                  messageRaw.message.base64 = buffer.toString('base64');
-                } else {
-                  // retry to download media
-                  const buffer = await downloadMediaMessage(
-                    { key: received.key, message: received?.message },
-                    'buffer',
-                    {},
-                    { logger: P({ level: 'error' }) as any, reuploadRequest: this.client.updateMediaMessage },
-                  );
-
-                  if (buffer) {
-                    messageRaw.message.base64 = buffer.toString('base64');
-                  }
-                }
-              } catch (error) {
-                this.logger.error(['Error converting media to base64', error?.message]);
+              const base64 = await this.downloadBase64ForWebhook(received);
+              if (base64) {
+                messageRaw.message.base64 = base64;
               }
             }
           }
@@ -4126,20 +4104,56 @@ export class BaileysStartupService extends ChannelStartupService {
     return map[mediaType] || null;
   }
 
+  /**
+   * Base64 da mídia para o webhook. O download do CDN do WhatsApp falha de forma
+   * intermitente; antes só um buffer vazio era tentado de novo, e uma exceção fazia o
+   * evento sair sem base64 e sem aviso.
+   */
+  private async downloadBase64ForWebhook(received: proto.IWebMessageInfo): Promise<string | undefined> {
+    const maxAttempts = 3;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const buffer = await downloadMediaMessage(
+          { key: received.key, message: received?.message },
+          'buffer',
+          {},
+          { logger: P({ level: 'error' }) as any, reuploadRequest: this.client.updateMediaMessage },
+        );
+        if (buffer?.length) return buffer.toString('base64');
+      } catch (error) {
+        if (attempt === maxAttempts) {
+          this.logger.error(['Error converting media to base64', received?.key?.id, error?.message]);
+          return undefined;
+        }
+      }
+      if (attempt < maxAttempts) await new Promise((resolve) => setTimeout(resolve, 1_000 * attempt));
+    }
+    this.logger.error(['Media download returned no content', received?.key?.id]);
+    return undefined;
+  }
+
   public async getBase64FromMediaMessage(data: getBase64FromMediaMessageDto, getBuffer = false) {
     try {
       const m = data?.message;
       const convertToMp4 = data?.convertToMp4 ?? false;
 
+      if (!m?.message && !m?.key?.id) {
+        throw 'Informe a mensagem completa ou "message.key.id"';
+      }
+
       const msg = m?.message ? m : ((await this.getMessage(m.key, true)) as proto.IWebMessageInfo);
 
-      if (!msg) {
+      if (!msg?.message) {
         throw 'Message not found';
       }
 
+      // Contêineres (efêmera, visualização única, documento com legenda...) guardam a mídia
+      // em .message. Áudio do iPhone pode vir com o contêiner sem esse campo: antes o loop
+      // trocava a mensagem por undefined e quebrava com TypeError (upstream #2550).
       for (const subtype of MessageSubtype) {
-        if (msg.message[subtype]) {
-          msg.message = msg.message[subtype].message;
+        const inner = msg.message?.[subtype]?.message;
+        if (inner) {
+          msg.message = inner;
         }
       }
 
