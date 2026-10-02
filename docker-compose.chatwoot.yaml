@@ -35,9 +35,11 @@ services:
       - '127.0.0.1:3000:3000'
     # O validador de URL da Evolution (isURL) recusa "_" no hostname, então o nome
     # do serviço não serve para configurar a integração. Use http://chatwoot-app:3000.
+    # O envio de mídia vai além: exige domínio com TLD. Para testar anexos do atendente,
+    # use FRONTEND_URL=http://chatwoot.qa.local:3000 (como um domínio de produção).
     networks:
       evo-dev-net:
-        aliases: [chatwoot-app]
+        aliases: [chatwoot-app, chatwoot.qa.local]
 
   chatwoot_sidekiq:
     <<: *chatwoot

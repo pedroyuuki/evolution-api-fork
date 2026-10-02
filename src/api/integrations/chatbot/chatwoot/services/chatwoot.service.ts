@@ -2404,6 +2404,8 @@ export class ChatwootService {
         if (quotedId)
           quotedMsg = await this.prismaRepository.message.findFirst({
             where: {
+              // Por instância: a cópia de outra instância aponta para outra caixa do Chatwoot.
+              instanceId: instance.instanceId,
               key: {
                 path: ['id'],
                 equals: quotedId,

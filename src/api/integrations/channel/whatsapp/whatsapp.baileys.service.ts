@@ -4045,8 +4045,10 @@ export class BaileysStartupService extends ChannelStartupService {
         const messageId = response.message?.protocolMessage?.key?.id;
         if (messageId) {
           const isLogicalDeleted = configService.get<Database>('DATABASE').DELETE_DATA.LOGICAL_MESSAGE_DELETE;
+          // Por instância: o mesmo id existe na cópia de cada instância que está na conversa,
+          // e sem o filtro a exclusão atingia a mensagem de outra instância.
           let message = await this.prismaRepository.message.findFirst({
-            where: { key: { path: ['id'], equals: messageId } },
+            where: { instanceId: this.instanceId, key: { path: ['id'], equals: messageId } },
           });
           if (isLogicalDeleted) {
             if (!message) return response;
@@ -4483,6 +4485,14 @@ export class BaileysStartupService extends ChannelStartupService {
           // 15 minutes in milliseconds
           throw new BadRequestException('Message is older than 15 minutes');
         }
+        // Valida antes de enviar: antes a checagem vinha depois do envio, e a edição saía
+        // para o WhatsApp mesmo quando a API respondia erro.
+        if (!(oldMessage.key as any)?.fromMe) {
+          throw new BadRequestException('You cannot edit others messages');
+        }
+        if ((oldMessage.key as any)?.deleted) {
+          throw new BadRequestException('You cannot edit deleted messages');
+        }
       }
 
       const messageSent = await this.client.sendMessage(jid, { ...(options as any), edit: data.key });
@@ -4501,17 +4511,12 @@ export class BaileysStartupService extends ChannelStartupService {
 
           const messageId = messageSent.message?.protocolMessage?.key?.id;
           if (messageId && this.configService.get<Database>('DATABASE').SAVE_DATA.NEW_MESSAGE) {
+            // Por instância: sem o filtro, com duas instâncias na mesma conversa, a busca
+            // pegava a cópia da outra (fromMe=false) e a API respondia erro com a edição já feita.
             let message = await this.prismaRepository.message.findFirst({
-              where: { key: { path: ['id'], equals: messageId } },
+              where: { instanceId: this.instanceId, key: { path: ['id'], equals: messageId } },
             });
             if (!message) throw new NotFoundException('Message not found');
-
-            if (!(message.key.valueOf() as any).fromMe) {
-              new BadRequestException('You cannot edit others messages');
-            }
-            if ((message.key.valueOf() as any)?.deleted) {
-              new BadRequestException('You cannot edit deleted messages');
-            }
 
             if (oldMessage.messageType === 'conversation' || oldMessage.messageType === 'extendedTextMessage') {
               oldMessage.message.conversation = data.text;
