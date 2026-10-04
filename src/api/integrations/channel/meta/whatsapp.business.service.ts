@@ -23,6 +23,7 @@ import { Events, wa } from '@api/types/wa.types';
 import { AudioConverter, Chatwoot, ConfigService, Database, Openai, S3, WaBusiness } from '@config/env.config';
 import { BadRequestException, InternalServerErrorException } from '@exceptions';
 import { createJid } from '@utils/createJid';
+import { omitInlineMedia } from '@utils/omitInlineMedia';
 import { prepareAudioForCloudApi } from '@utils/prepareAudioForCloudApi';
 import { status } from '@utils/renderStatus';
 import { sendTelemetry } from '@utils/sendTelemetry';
@@ -1333,10 +1334,15 @@ export class BusinessStartupService extends ChannelStartupService {
         source: 'unknown',
       };
 
-      this.logger.log(messageRaw);
+      // Banco e log ficam só com a referência da mídia: o base64 do arquivo enviado
+      // fazia cada mídia virar uma linha do tamanho do arquivo. Webhook e resposta seguem
+      // com a mensagem completa, como sempre.
+      const storedMessage = { ...messageRaw, message: omitInlineMedia(messageRaw.message) };
+
+      this.logger.log(storedMessage);
 
       await this.prismaRepository.message.create({
-        data: messageRaw,
+        data: storedMessage,
       });
 
       this.sendDataWebhook(Events.SEND_MESSAGE, messageRaw);
