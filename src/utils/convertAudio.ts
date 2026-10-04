@@ -24,7 +24,11 @@ const toBuffer = (audioInput: string | Buffer): Buffer | null => {
  * Rejeita quando o ffmpeg falha ou quando a saida vem vazia: nunca devolve um buffer
  * vazio como se fosse sucesso.
  */
-export async function convertAudio(audioInput: string | Buffer, target: AudioTarget = 'opus'): Promise<Buffer> {
+export async function convertAudio(
+  audioInput: string | Buffer,
+  target: AudioTarget = 'opus',
+  bitrate?: string,
+): Promise<Buffer> {
   const input = toBuffer(audioInput);
 
   if (!input?.length) {
@@ -57,9 +61,16 @@ export async function convertAudio(audioInput: string | Buffer, target: AudioTar
     const command = ffmpeg(inputStream).noVideo().audioChannels(1);
 
     if (target === 'opus') {
-      command.audioCodec('libopus').audioBitrate('32k').outputFormat('ogg');
+      command
+        .audioCodec('libopus')
+        .audioBitrate(bitrate ?? '32k')
+        .outputFormat('ogg');
     } else {
-      command.audioCodec('libmp3lame').audioBitrate('64k').audioFrequency(16000).outputFormat('mp3');
+      command
+        .audioCodec('libmp3lame')
+        .audioBitrate(bitrate ?? '64k')
+        .audioFrequency(16000)
+        .outputFormat('mp3');
     }
 
     command

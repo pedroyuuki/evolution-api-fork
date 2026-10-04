@@ -1,7 +1,7 @@
 import ffmpegPath from '@ffmpeg-installer/ffmpeg';
 import { isAcceptedByCloudApi, sniffAudioFormat } from '@utils/audioFormat';
 import { convertAudio } from '@utils/convertAudio';
-import { prepareAudioForCloudApi } from '@utils/prepareAudioForCloudApi';
+import { prepareAudioForCloudApi, VOICE_NOTE_MAX_BYTES } from '@utils/prepareAudioForCloudApi';
 import { execFile } from 'node:child_process';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
@@ -22,7 +22,7 @@ async function sample(name: string, ...args: string[]): Promise<Buffer> {
     '-f',
     'lavfi',
     '-i',
-    'sine=frequency=300:duration=2',
+    `sine=frequency=300:duration=${process.env.SAMPLE_SECONDS ?? 2}`,
     ...args,
     out,
   ]);
@@ -93,6 +93,49 @@ async function convertedOutputIsNotBiggerThanSource() {
   );
 }
 
+async function mp3BecomesVoiceNote() {
+  // O Chatwoot v4 grava a nota de voz do atendente em MP3: aceito pela API, mas a Meta só
+  // mostra como nota de voz (microfone, onda, transcrição) um OGG Opus com voice: true.
+  const mp3 = await sample('voz.mp3', '-ac', '1', '-c:a', 'libmp3lame');
+  const result = await prepareAudioForCloudApi(mp3, { voice: true });
+
+  assert.equal(result.converted, true);
+  assert.equal(result.voice, true);
+  assert.equal(result.mimetype, 'audio/ogg');
+  const out = sniffAudioFormat(result.buffer);
+  assert.equal(out.codec, 'opus');
+  assert.equal(out.channels, 1);
+}
+
+async function opusMonoVoiceNoteIsSentAsVoiceWithoutTranscoding() {
+  const opusMono = await sample('voz.ogg', '-ac', '1', '-ar', '16000', '-c:a', 'libopus');
+  const result = await prepareAudioForCloudApi(opusMono, { voice: true });
+  assert.equal(result.converted, false);
+  assert.equal(result.voice, true);
+}
+
+async function audioFileKeepsAcceptedFormatAndIsNotVoice() {
+  // sendMedia com áudio é envio de arquivo: o MP3 vai como está, sem voice.
+  const mp3 = await sample('arquivo.mp3', '-ac', '1', '-c:a', 'libmp3lame');
+  const result = await prepareAudioForCloudApi(mp3, { voice: false });
+  assert.equal(result.converted, false);
+  assert.equal(result.voice, false);
+  assert.ok(result.buffer.equals(mp3));
+}
+
+async function longVoiceNoteFitsTheMetaPlayIconLimit() {
+  // Acima de 512 KB a Meta troca o play por download. Opus a 32k estoura em ~2 min;
+  // a 16k (taxa recomendada pela Meta) cabe até ~4 min.
+  process.env.SAMPLE_SECONDS = '150';
+  const big = await sample('longa.ogg', '-ac', '1', '-c:a', 'libopus', '-b:a', '64k');
+  delete process.env.SAMPLE_SECONDS;
+  assert.ok(big.length > VOICE_NOTE_MAX_BYTES, `amostra precisa passar do limite: ${big.length}`);
+
+  const result = await prepareAudioForCloudApi(big, { voice: true });
+  assert.equal(result.voice, true);
+  assert.ok(result.buffer.length <= VOICE_NOTE_MAX_BYTES, `nota de voz com ${result.buffer.length} bytes`);
+}
+
 async function rejectsGarbageInsteadOfReturningEmpty() {
   await assert.rejects(
     () => convertAudio(Buffer.from('isto definitivamente nao e um audio valido')),
@@ -107,6 +150,10 @@ const tests = [
   convertsOnlyWhatIsNotAccepted,
   convertedOutputIsNotBiggerThanSource,
   rejectsGarbageInsteadOfReturningEmpty,
+  mp3BecomesVoiceNote,
+  opusMonoVoiceNoteIsSentAsVoiceWithoutTranscoding,
+  audioFileKeepsAcceptedFormatAndIsNotVoice,
+  longVoiceNoteFitsTheMetaPlayIconLimit,
 ];
 
 (async () => {

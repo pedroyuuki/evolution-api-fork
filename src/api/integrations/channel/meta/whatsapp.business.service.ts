@@ -1213,6 +1213,7 @@ export class BusinessStartupService extends ChannelStartupService {
             to: number.replace(/\D/g, ''),
             [message['mediaType']]: {
               [message['type']]: message['id'],
+              ...(message['mediaType'] === 'audio' && message['voice'] && { voice: true }),
               ...(message['mediaType'] !== 'audio' &&
                 message['mediaType'] !== 'video' &&
                 message['fileName'] &&
@@ -1231,6 +1232,7 @@ export class BusinessStartupService extends ChannelStartupService {
             to: number.replace(/\D/g, ''),
             audio: {
               [message['type']]: message['id'],
+              ...(message['voice'] && { voice: true }),
             },
           };
           quoted ? (content.context = { message_id: quoted.id }) : content;
@@ -1572,14 +1574,15 @@ export class BusinessStartupService extends ChannelStartupService {
     }
 
     try {
-      // Converte apenas o que a Cloud API não aceita. Nota de voz sai do Chatwoot em
-      // OGG Opus mono, que é aceito como está — transcodificar só pioraria o áudio.
-      const prepared = await prepareAudioForCloudApi(source);
+      // Este caminho é o da nota de voz (sendWhatsAppAudio, Chatwoot, chatbots). A Meta
+      // só mostra como nota de voz um OGG Opus mono enviado com voice: true; MP3 (como o
+      // Chatwoot v4 grava) chegava como arquivo de áudio comum, sem a onda e o microfone.
+      const prepared = await prepareAudioForCloudApi(source, { voice: true });
 
       this.logger.verbose(
         `[Cloud API] Áudio ${prepared.detectedCodec}: ${
           prepared.converted ? `convertido para ${prepared.mimetype}` : 'aceito sem conversão'
-        } (${prepared.buffer.length} bytes)`,
+        } (${prepared.buffer.length} bytes, nota de voz: ${prepared.voice ? 'sim' : 'não'})`,
       );
 
       const prepareMedia: any = {
@@ -1587,6 +1590,8 @@ export class BusinessStartupService extends ChannelStartupService {
         mediaType: 'audio',
         media: prepared.buffer.toString('base64'),
         mimetype: prepared.mimetype,
+        voice: prepared.voice,
+        ptt: prepared.voice,
       };
 
       const id = await this.getIdMedia(prepareMedia);
