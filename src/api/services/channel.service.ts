@@ -632,7 +632,8 @@ export class ChannelStartupService {
         ...timestampFilter,
         AND: [
           keyFilters?.id ? { key: { path: ['id'], equals: keyFilters?.id } } : {},
-          keyFilters?.fromMe ? { key: { path: ['fromMe'], equals: keyFilters?.fromMe } } : {},
+          // fromMe: false é um filtro válido; o teste de verdade o descartava.
+          typeof keyFilters?.fromMe === 'boolean' ? { key: { path: ['fromMe'], equals: keyFilters.fromMe } } : {},
           keyFilters?.remoteJid ? { key: { path: ['remoteJid'], equals: keyFilters?.remoteJid } } : {},
           keyFilters?.participants ? { key: { path: ['participants'], equals: keyFilters?.participants } } : {},
         ],
@@ -656,7 +657,8 @@ export class ChannelStartupService {
         ...timestampFilter,
         AND: [
           keyFilters?.id ? { key: { path: ['id'], equals: keyFilters?.id } } : {},
-          keyFilters?.fromMe ? { key: { path: ['fromMe'], equals: keyFilters?.fromMe } } : {},
+          // fromMe: false é um filtro válido; o teste de verdade o descartava.
+          typeof keyFilters?.fromMe === 'boolean' ? { key: { path: ['fromMe'], equals: keyFilters.fromMe } } : {},
           keyFilters?.remoteJid ? { key: { path: ['remoteJid'], equals: keyFilters?.remoteJid } } : {},
           keyFilters?.participants ? { key: { path: ['participants'], equals: keyFilters?.participants } } : {},
         ],

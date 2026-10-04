@@ -18,7 +18,9 @@ Variáveis (padrões entre parênteses, os do QA local):
     SMOKE_GROUP_JID        grupo onde B participa; sem ele os testes de grupo são pulados
     SMOKE_WEBHOOK_PORT     porta local do receptor de webhook (9914)
     SMOKE_WEBHOOK_URL      como a Evolution alcança esse receptor
-                           (http://host.docker.internal:<porta>/hook)
+                           (http://host.docker.internal:<porta>/hook). Use "off" quando a
+                           Evolution não alcança esta máquina (servidor remoto): os testes
+                           que dependem só do webhook são pulados e os demais seguem pela API.
     SMOKE_IMAGE_FILE       imagem PNG de teste (a favicon do manager)
     SMOKE_AUDIO_FILE       áudio de teste; sem ele é gerado um WAV de 2s
     SMOKE_CHATWOOT_URL     ex.: http://localhost:3000; sem URL e token o bloco é pulado
@@ -68,6 +70,7 @@ JID_A, JID_B = PN_A + "@s.whatsapp.net", PN_B + "@s.whatsapp.net"
 GROUP = env("SMOKE_GROUP_JID")
 PORT = int(env("SMOKE_WEBHOOK_PORT", "9914"))
 WEBHOOK_URL = env("SMOKE_WEBHOOK_URL", f"http://host.docker.internal:{PORT}/hook")
+WEBHOOK_ON = WEBHOOK_URL.lower() != "off"
 CW_URL = (env("SMOKE_CHATWOOT_URL") or "").rstrip("/")
 CW_TOKEN = env("SMOKE_CHATWOOT_TOKEN")
 CW_ACCOUNT = env("SMOKE_CHATWOOT_ACCOUNT", "1")
@@ -222,6 +225,11 @@ def test(block, name):
     return decorator
 
 
+def need_webhook():
+    if not WEBHOOK_ON:
+        raise Skip("SMOKE_WEBHOOK_URL=off")
+
+
 def run():
     # ---------------------------------------------------------------- infraestrutura
     @test("infra", "GET / (versão)")
@@ -247,6 +255,7 @@ def run():
 
     @test("infra", "webhook/set liga o webhook e o base64 sem reiniciar a instância")
     def _():
+        need_webhook()
         status, body = api("POST", f"/webhook/set/{B}", {"webhook": {
             "enabled": True, "url": WEBHOOK_URL, "byEvents": False, "base64": True,
             "events": ["MESSAGES_UPSERT", "MESSAGES_UPDATE", "MESSAGES_DELETE", "SEND_MESSAGE", "MESSAGES_EDITED"]}})
@@ -277,6 +286,7 @@ def run():
 
     @test("mensagens", "webhook MESSAGES_UPSERT do destino com o mesmo remoteJid")
     def _():
+        need_webhook()
         found = wait(lambda: events("messages.upsert", ctx["text"]), 20)
         if not found:
             return False, "evento não chegou"
@@ -298,10 +308,10 @@ def run():
         ok, detail = check_received(mid, "imageMessage")
         if not ok:
             return ok, detail
-        found = wait(lambda: events("messages.upsert", mid), 20)
+        found = wait(lambda: events("messages.upsert", mid), 20) if WEBHOOK_ON else None
         webhook_b64 = found[0]["data"]["message"].get("base64", 0) if found else 0
         status, body = api("POST", f"/chat/getBase64FromMediaMessage/{B}", {"message": {"key": {"id": mid}}})
-        return webhook_b64 > 0 and status in (200, 201) and len(body.get("base64", "")) > 0, \
+        return (webhook_b64 > 0 or not WEBHOOK_ON) and status in (200, 201) and len(body.get("base64", "")) > 0, \
             f"webhook base64={webhook_b64} endpoint HTTP {status} base64={len(body.get('base64', ''))}"
 
     @test("mensagens", "documento preserva o nome do arquivo")
@@ -362,7 +372,7 @@ def run():
         status, _r = api("POST", f"/chat/updateMessage/{A}", {"number": PN_B, "key": {"id": mid, "remoteJid": JID_B, "fromMe": True},
                                                            "text": f"[smoke {TAG}] editada"})
         edited = wait(lambda: [e for e in events(contains=mid) if e["event"] in ("messages.update", "messages.edited", "messages.upsert")
-                               and "editada" in json.dumps(e["data"], ensure_ascii=False)], 25)
+                               and "editada" in json.dumps(e["data"], ensure_ascii=False)], 25) if WEBHOOK_ON else [{"event": "(webhook off)"}]
         record = find_msg(A, mid) or {}
         statuses = [u.get("status") for u in record.get("MessageUpdate") or []]
         return status in (200, 201) and bool(edited) and "EDITED" in statuses, \
@@ -374,6 +384,8 @@ def run():
         received(B, mid)
         before = len(events())
         status, response = api("POST", f"/chat/updateMessage/{B}", {"number": PN_A, "key": {"id": mid, "remoteJid": JID_A, "fromMe": False}, "text": "invasao"})
+        if not WEBHOOK_ON:
+            return status == 400, f"HTTP {status} (sem webhook, o vazamento não é verificado)"
         time.sleep(6)
         # B emite SEND_MESSAGE para tudo o que envia: nenhum evento com o texto = nada saiu.
         leaked = [e for e in events()[before:] if "invasao" in json.dumps(e["data"])]
@@ -384,6 +396,8 @@ def run():
         mid = send("sendText", {"number": PN_B, "text": f"[smoke {TAG}] vai ser apagada"})
         received(B, mid)
         status, _r = api("DELETE", f"/chat/deleteMessageForEveryone/{A}", {"id": mid, "remoteJid": JID_B, "fromMe": True})
+        if not WEBHOOK_ON:
+            return status in (200, 201), f"HTTP {status} (sem webhook, a chegada no destino não é verificada)"
         found = wait(lambda: [e for e in events(contains=mid) if e["event"] in ("messages.delete", "messages.update")
                               and (e["event"] == "messages.delete" or "REVOKE" in json.dumps(e["data"]) or "DELETED" in json.dumps(e["data"]))], 25)
         return status in (200, 201) and bool(found), f"HTTP {status}; evento no destino={found[0]['event'] if found else 'nenhum'}"
@@ -487,6 +501,9 @@ def run():
 
 
 def main():
+    if not WEBHOOK_ON:
+        run()
+        return summarize()
     server = http.server.ThreadingHTTPServer(("0.0.0.0", PORT), WebhookHandler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     _s, previous_webhook = api("GET", f"/webhook/find/{B}")
@@ -502,7 +519,10 @@ def main():
         else:
             api("POST", f"/webhook/set/{B}", {"webhook": {"enabled": False, "url": WEBHOOK_URL, "byEvents": False, "base64": False, "events": ["MESSAGES_UPSERT"]}})
         server.shutdown()
+    summarize()
 
+
+def summarize():
     ran = [r for r in results if r["ok"] is not None]
     passed = sum(1 for r in ran if r["ok"])
     skipped = len(results) - len(ran)
