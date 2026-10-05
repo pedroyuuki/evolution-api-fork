@@ -166,6 +166,18 @@ export class ChatwootWebhookDispatcher {
       return 0;
     }
 
+    // O processo anterior pode ter morrido entre marcar concluído e apagar o pendente:
+    // esse job já foi entregue e não pode ser reenviado.
+    const pending: WebhookJob[] = [];
+    for (const job of orphans) {
+      if (await this.options.store.isDone(job).catch(() => false)) {
+        await this.options.store.remove(job).catch(() => undefined);
+      } else {
+        pending.push(job);
+      }
+    }
+    orphans = pending;
+
     orphans.sort((a, b) => a.receivedAt - b.receivedAt);
     for (const job of orphans) this.known.add(this.knownKey(job));
 

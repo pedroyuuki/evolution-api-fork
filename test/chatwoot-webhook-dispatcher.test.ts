@@ -218,6 +218,21 @@ async function staleRecoveredMessageBecomesNotice() {
   await dispatcher.stop(1_000);
 }
 
+async function completedOrphanIsDroppedNotResent() {
+  // Morte entre markDone e remove: o pendente sobra, mas o envio já aconteceu.
+  const store = new MemoryStore();
+  const job = { id: webhookJobId(message(1)), instanceName: 'qa', queueKey: 'qa:8', body: message(1), receivedAt: Date.now() - 1_000 };
+  await store.save(job);
+  await store.markDone(job);
+  const { dispatcher, handled } = setup({ store });
+
+  assert.equal(await dispatcher.recover(), 0);
+  await sleep(80);
+  assert.equal(handled.length, 0, 'não reenvia o que já foi entregue');
+  assert.equal(store.pending.size, 0, 'e limpa o pendente que sobrou');
+  await dispatcher.stop(1_000);
+}
+
 async function jobsOfThisProcessAreNotRecoveredTwice() {
   const { dispatcher, handled } = setup();
   await dispatcher.accept('qa', message(1));
@@ -257,6 +272,7 @@ const tests = [
   storeOutageStillDeliversInMemory,
   recoveryWaitsForInstanceAndResumesInOrder,
   staleRecoveredMessageBecomesNotice,
+  completedOrphanIsDroppedNotResent,
   jobsOfThisProcessAreNotRecoveredTwice,
   stopRefusesNewWorkAndHonorsTimeout,
   pickNextPrefersLowestMessageIdButKeepsOtherEventsFifo,

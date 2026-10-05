@@ -1,7 +1,18 @@
 import { InstanceDto } from '@api/dto/instance.dto';
 import { ChatwootWebhookDispatcher } from '@api/integrations/chatbot/chatwoot/utils/webhook-dispatcher';
-import { CacheWebhookJobStore } from '@api/integrations/chatbot/chatwoot/utils/webhook-job-store';
-import { chatwootCache, chatwootController, prismaRepository, waMonitor } from '@api/server.module';
+import {
+  CacheWebhookJobStore,
+  legacyPendingMigrator,
+} from '@api/integrations/chatbot/chatwoot/utils/webhook-job-store';
+import {
+  CHATWOOT_CACHE_MODULE,
+  chatwootCache,
+  chatwootController,
+  prismaRepository,
+  waMonitor,
+} from '@api/server.module';
+import { redisClient } from '@cache/rediscache.client';
+import { CacheConf, configService } from '@config/env.config';
 import { reportBackgroundError } from '@utils/reportError';
 
 // Módulo próprio, sem dependência das rotas: o main.ts o importa para retomar e drenar
@@ -11,9 +22,23 @@ import { reportBackgroundError } from '@utils/reportError';
  * Webhooks do Chatwoot: gravados no Redis, respondidos na hora e processados em série por
  * conversa (ver ChatwootWebhookDispatcher). Só existe com a integração do Chatwoot ligada.
  */
+const redisConf = configService.get<CacheConf>('CACHE')?.REDIS;
+
+function createStore(): CacheWebhookJobStore {
+  const store: CacheWebhookJobStore = new CacheWebhookJobStore(
+    chatwootCache,
+    redisConf?.ENABLED
+      ? legacyPendingMigrator(redisClient.getConnection(), redisConf.PREFIX_KEY, CHATWOOT_CACHE_MODULE, (job) =>
+          store.save(job),
+        )
+      : undefined,
+  );
+  return store;
+}
+
 export const chatwootWebhookDispatcher = chatwootCache
   ? new ChatwootWebhookDispatcher({
-      store: new CacheWebhookJobStore(chatwootCache),
+      store: createStore(),
       handle: (job) => chatwootController.receiveWebhook({ instanceName: job.instanceName } as InstanceDto, job.body),
       onExpired: (job) =>
         chatwootController.notifyUnsentMessage(

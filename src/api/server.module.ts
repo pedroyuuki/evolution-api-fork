@@ -48,8 +48,14 @@ import { TemplateService } from './services/template.service';
 const logger = new Logger('WA MODULE');
 
 // null com a integração desligada; o despachante de webhooks do Chatwoot usa o mesmo cache.
+/** Módulo das chaves do cache do Chatwoot no Redis (`<prefixo>:chatwoot:...`). */
+export const CHATWOOT_CACHE_MODULE = 'chatwoot';
+
 export const chatwootCache: CacheService | null = configService.get<Chatwoot>('CHATWOOT').ENABLED
-  ? new CacheService(new CacheEngine(configService, ChatwootService.name).getEngine())
+  ? // Nome fixo: o nome da classe sai minificado e muda a cada build, e cada imagem nova
+    // passava a gravar e procurar numa área diferente do Redis (a fila durável do webhook
+    // não era retomada depois do deploy).
+    new CacheService(new CacheEngine(configService, CHATWOOT_CACHE_MODULE).getEngine())
   : null;
 
 export const cache = new CacheService(new CacheEngine(configService, 'instance').getEngine());
