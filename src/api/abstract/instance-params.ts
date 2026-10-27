@@ -15,7 +15,13 @@ export function resolveInstanceParams(
   isCreateRoute: boolean,
 ): InstanceDto {
   const fromQuery = { ...(query ?? {}) };
-  for (const field of IDENTITY_FIELDS) delete fromQuery[field];
+  // Com a instância no path (o que o guard validou), a query não pode trocá-la. Sem ela no
+  // path (só /instance/fetchInstances e /instance/create passam pelos guards assim), a query
+  // é o filtro: o manager pede `fetchInstances?instanceId=` com a chave global, e com token
+  // de instância o controller já filtra pelo token.
+  if (params?.instanceName !== undefined) {
+    for (const field of IDENTITY_FIELDS) delete fromQuery[field];
+  }
 
   const instance = { ...fromQuery, ...params } as InstanceDto;
 

@@ -432,6 +432,48 @@ def run():
         text = json.dumps(body, ensure_ascii=False)
         return status == 400 and "TypeError" not in text, f"HTTP {status} {text[:100]}"
 
+    # ---------------------------------------------------------------- isolamento entre instâncias
+    def token_of(name):
+        status, body = api("GET", "/instance/fetchInstances")
+        token = next((i.get("token") for i in (body or []) if i.get("name") == name), None)
+        if not token:
+            raise Skip("fetchInstances não expõe o token (AUTHENTICATION_EXPOSE_IN_FETCH_INSTANCES)")
+        return token
+
+    @test("isolamento", "?instanceName= na query não troca a instância do path")
+    def _():
+        status, body = request("GET", f"{API}/instance/connectionState/{A}?instanceName={B}", headers={"apikey": token_of(A)})
+        name = (body or {}).get("instance", {}).get("instanceName")
+        return status == 200 and name == A, f"HTTP {status}, respondeu pela instância {name}"
+
+    @test("isolamento", "token de instância não passa como chave global (create com ?x=/instance/fetchInstances)")
+    def _():
+        probe = f"smoke-nao-criar-{int(time.time())}"
+        status, _body = request("POST", f"{API}/instance/create?x=/instance/fetchInstances",
+                                {"instanceName": probe, "integration": "WHATSAPP-BAILEYS"}, {"apikey": token_of(A)})
+        if status in (200, 201):
+            api("DELETE", f"/instance/delete/{probe}")
+        return status in (401, 403), f"HTTP {status}"
+
+    @test("isolamento", "token de instância não lê o token do Facebook (verify-creds com ?x=)")
+    def _():
+        status, _body = request("POST", f"{API}/verify-creds?x=/instance/fetchInstances", {}, {"apikey": token_of(A)})
+        return status in (401, 403), f"HTTP {status}"
+
+    @test("isolamento", "fetchInstances?instanceId= com a chave global devolve só a instância pedida (manager)")
+    def _():
+        status, body = api("GET", "/instance/fetchInstances")
+        target = next((i for i in (body or []) if i.get("name") == B), {})
+        status, body = api("GET", f"/instance/fetchInstances?instanceId={target.get('id')}")
+        names = [i.get("name") for i in (body or [])] if status == 200 else []
+        return names == [B], f"HTTP {status} {names}"
+
+    @test("isolamento", "fetchInstances com token de instância lista só ela")
+    def _():
+        status, body = request("GET", f"{API}/instance/fetchInstances", headers={"apikey": token_of(A)})
+        names = [i.get("name") for i in (body or [])] if status == 200 else []
+        return names == [A], f"HTTP {status} {names}"
+
     # ---------------------------------------------------------------- grupos
     @test("grupos", "fetchAllGroups e findGroupInfos")
     def _():

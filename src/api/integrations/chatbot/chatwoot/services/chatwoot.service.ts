@@ -1889,20 +1889,6 @@ export class ChatwootService {
           return { message: 'bot' };
         }
 
-        // Já enviada por esta instância (webhook repetido, ou outro processo no mesmo Redis):
-        // a mensagem do Chatwoot já tem o id do WhatsApp gravado.
-        if (
-          body.event === 'message_created' &&
-          body.id &&
-          (await this.prismaRepository.message.findFirst({
-            where: { instanceId: instance.instanceId, chatwootMessageId: body.id },
-            select: { id: true },
-          }))
-        ) {
-          this.logger.warn(`Chatwoot: mensagem ${body.id} já enviada por ${instance.instanceName}; não reenvia`);
-          return { message: 'bot' };
-        }
-
         const connectionState = waInstance?.connectionStatus?.state;
         if (connectionState !== 'open' && body.conversation?.id) {
           this.logger.warn(`Instance ${instance.instanceName} is not connected (state: ${connectionState})`);
@@ -2021,7 +2007,6 @@ export class ChatwootService {
 
         const chatwootRead = this.configService.get<Chatwoot>('CHATWOOT').MESSAGE_READ;
         if (chatwootRead) {
-          // A última mensagem recebida DESTA conversa (antes era uma qualquer da instância).
           const lastMessage = await this.prismaRepository.message.findFirst({
             where: {
               key: {
@@ -2029,9 +2014,7 @@ export class ChatwootService {
                 equals: false,
               },
               instanceId: instance.instanceId,
-              chatwootConversationId: body.conversation.id,
             },
-            orderBy: { messageTimestamp: 'desc' },
           });
           if (lastMessage && !lastMessage.chatwootIsRead) {
             const key = lastMessage.key as WAMessageKey;

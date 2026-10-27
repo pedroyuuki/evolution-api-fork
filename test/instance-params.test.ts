@@ -15,6 +15,13 @@ function queryNaoDefineInstanceId() {
   assert.equal(instance.instanceId, undefined);
 }
 
+function rotaSemInstanciaNoPathMantemOFiltroDaQuery() {
+  // GET /instance/fetchInstances?instanceId=X (manager, chave global): a query É o filtro.
+  const instance = resolveInstanceParams({}, { instanceId: 'id-B', instanceName: 'B' }, {}, false);
+  assert.equal(instance.instanceId, 'id-B');
+  assert.equal(instance.instanceName, 'B');
+}
+
 function naoMutaParams() {
   const params = { instanceName: 'A' };
   resolveInstanceParams(params, { page: '2' }, {}, false);
@@ -53,6 +60,7 @@ function queryNaoViraRotaGlobal() {
 const tests = [
   queryNaoTrocaAInstancia,
   queryNaoDefineInstanceId,
+  rotaSemInstanciaNoPathMantemOFiltroDaQuery,
   naoMutaParams,
   createUsaOBody,
   foraDoCreateOBodyNaoEntra,
