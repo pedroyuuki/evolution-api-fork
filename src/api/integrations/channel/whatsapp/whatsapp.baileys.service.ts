@@ -1549,7 +1549,7 @@ export class BaileysStartupService extends ChannelStartupService {
             const { remoteJid } = messageRaw.key;
             const timestamp = msg.messageTimestamp;
             const fromMe = received.key.fromMe.toString();
-            const messageKey = `${remoteJid}_${timestamp}_${fromMe}`;
+            const messageKey = `${this.instanceId}_${remoteJid}_${timestamp}_${fromMe}`; // por instância: o mesmo grupo chega a várias
 
             const cachedTimestamp = await this.baileysCache.get(messageKey);
 
@@ -1851,7 +1851,7 @@ export class BaileysStartupService extends ChannelStartupService {
               const { remoteJid } = key;
               const timestamp = findMessage.messageTimestamp;
               const fromMe = key.fromMe.toString();
-              const messageKey = `${remoteJid}_${timestamp}_${fromMe}`;
+              const messageKey = `${this.instanceId}_${remoteJid}_${timestamp}_${fromMe}`; // por instância: o mesmo grupo chega a várias
 
               const cachedTimestamp = await this.baileysCache.get(messageKey);
 
@@ -4595,6 +4595,14 @@ export class BaileysStartupService extends ChannelStartupService {
   }
 
   // Group
+  /**
+   * O cache de metadados de grupo é um só para todas as instâncias: pela chave só do grupo,
+   * uma instância que não participa (ou saiu) recebia a visão de participantes de outra.
+   */
+  private groupCacheKey(groupJid: string): string {
+    return `${this.instanceId}:${groupJid}`;
+  }
+
   private async updateGroupMetadataCache(groupJid: string) {
     try {
       const meta = await this.client.groupMetadata(groupJid);
@@ -4603,7 +4611,7 @@ export class BaileysStartupService extends ChannelStartupService {
 
       if ((cacheConf?.REDIS?.ENABLED && cacheConf?.REDIS?.URI !== '') || cacheConf?.LOCAL?.ENABLED) {
         this.logger.verbose(`Updating cache for group: ${groupJid}`);
-        await groupMetadataCache.set(groupJid, { timestamp: Date.now(), data: meta });
+        await groupMetadataCache.set(this.groupCacheKey(groupJid), { timestamp: Date.now(), data: meta });
       }
 
       return meta;
@@ -4619,9 +4627,9 @@ export class BaileysStartupService extends ChannelStartupService {
     const cacheConf = this.configService.get<CacheConf>('CACHE');
 
     if ((cacheConf?.REDIS?.ENABLED && cacheConf?.REDIS?.URI !== '') || cacheConf?.LOCAL?.ENABLED) {
-      if (await groupMetadataCache?.has(groupJid)) {
+      if (await groupMetadataCache?.has(this.groupCacheKey(groupJid))) {
         console.log(`Cache request for group: ${groupJid}`);
-        const meta = await groupMetadataCache.get(groupJid);
+        const meta = await groupMetadataCache.get(this.groupCacheKey(groupJid));
 
         if (Date.now() - meta.timestamp > 3600000) {
           await this.updateGroupMetadataCache(groupJid);
@@ -5073,7 +5081,7 @@ export class BaileysStartupService extends ChannelStartupService {
 
   private async updateChatUnreadMessages(remoteJid: string): Promise<number> {
     const [chat, unreadMessages] = await Promise.all([
-      this.prismaRepository.chat.findFirst({ where: { remoteJid } }),
+      this.prismaRepository.chat.findFirst({ where: { instanceId: this.instanceId, remoteJid } }),
       // Use raw SQL to avoid JSON path issues
       this.prismaRepository.$queryRaw`
         SELECT COUNT(*)::int as count FROM "Message"

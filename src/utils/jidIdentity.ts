@@ -220,3 +220,13 @@ export function getAvailableNumbers(remoteJid: string): string[] {
 
   return numbersAvailable.map((number) => `${number}@${domain}`);
 }
+
+/**
+ * Alguma das opções (`jidOptions`, separadas por vírgula) é exatamente um dos jids. A busca
+ * no banco usa `contains`, que também casa um número que é sufixo de outro (um LID de 15
+ * dígitos que termina com um de 14, um fixo estrangeiro que termina com um celular BR).
+ */
+export function jidOptionsInclude(jidOptions: string | null | undefined, jids: string[]): boolean {
+  if (!jidOptions) return false;
+  return jidOptions.split(',').some((option) => jids.includes(option));
+}

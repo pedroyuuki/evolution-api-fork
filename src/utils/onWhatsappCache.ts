@@ -6,6 +6,7 @@ import {
   dedupePairs,
   getAvailableNumbers,
   isRealLidJid,
+  jidOptionsInclude,
   LidPnPair,
   planLidMappingUpdate,
 } from '@utils/jidIdentity';
@@ -52,7 +53,7 @@ export async function saveOnWhatsappCache(data: ISaveOnWhatsappCacheParams[]) {
       // Às vezes acontece do remoteJid atual NÃO ESTAR no jidOptions ainda, ocasionando o erro:
       // 'Unique constraint failed on the fields: (`remoteJid`)'
       // Isso acontece principalmente em grupos que possuem o número do criador no ID (ex.: '559911223345-1234567890@g.us')
-      const existingRecord = await prismaRepository.isOnWhatsapp.findFirst({
+      const candidates = await prismaRepository.isOnWhatsapp.findMany({
         where: {
           OR: [
             ...expandedJids.map((jid) => ({ jidOptions: { contains: jid } })),
@@ -60,6 +61,11 @@ export async function saveOnWhatsappCache(data: ISaveOnWhatsappCacheParams[]) {
           ],
         },
       });
+      // O `contains` casa também números que são sufixo de outro: só vale a linha exata, senão
+      // o número X seria juntado à linha de Y (e o envio para X iria para Y).
+      const existingRecord = candidates.find(
+        (row) => row.remoteJid === remoteJid || jidOptionsInclude(row.jidOptions, expandedJids),
+      );
 
       logger.verbose(
         `[saveOnWhatsappCache] Register exists for [${expandedJids.join(',')}]? => ${existingRecord ? existingRecord.remoteJid : 'Not found'}`,
