@@ -16,7 +16,11 @@ import {
   planContactLink,
   sameContactCandidates,
 } from '@api/integrations/chatbot/chatwoot/utils/contact-identity';
-import { eventMessages, isEvolutionEcho } from '@api/integrations/chatbot/chatwoot/utils/webhook-message';
+import {
+  eventMessages,
+  isEvolutionEcho,
+  isFromAnotherInbox,
+} from '@api/integrations/chatbot/chatwoot/utils/webhook-message';
 import { PrismaRepository } from '@api/repository/repository.service';
 import { CacheService } from '@api/services/cache.service';
 import { WAMonitoringService } from '@api/services/monitor.service';
@@ -1659,6 +1663,17 @@ export class ChatwootService {
         body.private ||
         (body.event === 'message_updated' && !body.content_attributes?.deleted)
       ) {
+        return { message: 'bot' };
+      }
+
+      // Só a própria caixa: um evento de outra caixa (webhook da conta ou de agente-robô
+      // apontado para esta instância) não pode sair por este número.
+      const ownInbox = await this.getInbox(instance);
+      if (isFromAnotherInbox(body, ownInbox?.id)) {
+        this.logger.warn(
+          `Chatwoot: evento da caixa ${body?.inbox?.id ?? body?.conversation?.inbox_id} ignorado pela instância ` +
+            `${instance.instanceName} (caixa ${ownInbox?.id}): verifique webhooks da conta e de agentes-robô`,
+        );
         return { message: 'bot' };
       }
 

@@ -1,4 +1,4 @@
-import { eventMessages, isEvolutionEcho } from '@api/integrations/chatbot/chatwoot/utils/webhook-message';
+import { eventMessages, isEvolutionEcho, isFromAnotherInbox } from '@api/integrations/chatbot/chatwoot/utils/webhook-message';
 import assert from 'node:assert/strict';
 
 // Payload real do incidente de 26/10: a cópia do template da Cloud (raiz, source_id WAID)
@@ -43,7 +43,23 @@ function messageWithoutAttachmentsHasEmptyList() {
   assert.deepEqual(message.attachments, []);
 }
 
+function eventsOfAnotherInboxAreRejected() {
+  // A cópia da Cloud (caixa 160) chegando no endereço da instância da caixa 162.
+  assert.equal(isFromAnotherInbox({ inbox: { id: 160 }, conversation: { inbox_id: 160 } }, 162), true);
+  assert.equal(isFromAnotherInbox({ inbox: { id: 162 } }, 162), false);
+  assert.equal(isFromAnotherInbox({ conversation: { inbox_id: '162' } }, 162), false, 'id em texto ou número');
+  assert.equal(isFromAnotherInbox({ conversation: { inbox_id: 160 } }, 162), true, 'sem inbox na raiz usa a da conversa');
+}
+
+function unknownInboxNeverBlocks() {
+  // Sem saber a caixa da instância (nome não confere) ou do evento, não bloqueia.
+  assert.equal(isFromAnotherInbox({ inbox: { id: 160 } }, undefined), false);
+  assert.equal(isFromAnotherInbox({}, 162), false);
+}
+
 const tests = [
+  eventsOfAnotherInboxAreRejected,
+  unknownInboxNeverBlocks,
   echoIsDetectedByTheMessageItself,
   legacyDetectionStillWorks,
   agentMessagesAreNotEchoes,

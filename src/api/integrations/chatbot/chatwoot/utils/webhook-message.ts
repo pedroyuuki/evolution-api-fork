@@ -31,3 +31,23 @@ export function eventMessages(body: any): any[] {
   }
   return body?.conversation?.messages ?? [];
 }
+
+/**
+ * O evento é de uma conversa de OUTRA caixa do Chatwoot. Uma instância só envia o que é da
+ * própria caixa: eventos de outras caixas chegam por webhooks da conta ou de agentes-robô
+ * apontados para a instância, e enviá-los fazia um número mandar mensagens de conversas
+ * que não são dele (incidente de 26/10: a cópia de templates de duas instâncias Cloud saiu
+ * por uma instância Baileys que não envia nada).
+ */
+export function isFromAnotherInbox(body: any, instanceInboxId: number | string | undefined | null): boolean {
+  const eventInboxId = body?.inbox?.id ?? body?.conversation?.inbox_id;
+  if (
+    eventInboxId === undefined ||
+    eventInboxId === null ||
+    instanceInboxId === undefined ||
+    instanceInboxId === null
+  ) {
+    return false;
+  }
+  return String(eventInboxId) !== String(instanceInboxId);
+}
