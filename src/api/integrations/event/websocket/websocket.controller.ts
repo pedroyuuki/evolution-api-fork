@@ -3,9 +3,12 @@ import { WAMonitoringService } from '@api/services/monitor.service';
 import { Auth, configService, Cors, Log, Websocket } from '@config/env.config';
 import { Logger } from '@config/logger.config';
 import { Server } from 'http';
-import { Server as SocketIO } from 'socket.io';
+import { Server as SocketIO, Socket } from 'socket.io';
 
 import { EmitData, EventController, EventControllerInterface } from '../event.controller';
+import { canUseInstance, resolvePrincipal, SocketPrincipal } from './websocket-access';
+
+const GLOBAL_EVENTS_ROOM = 'global-events';
 
 export class WebsocketController extends EventController implements EventControllerInterface {
   private io: SocketIO;
@@ -28,38 +31,14 @@ export class WebsocketController extends EventController implements EventControl
       allowRequest: async (req, callback) => {
         try {
           const url = new URL(req.url || '', 'http://localhost');
-          const params = new URLSearchParams(url.search);
+          const principal = await this.principalOf(
+            url.searchParams.get('apikey') || (req.headers.apikey as string),
+            req.socket.remoteAddress,
+          );
 
-          const { remoteAddress } = req.socket;
-          const websocketConfig = configService.get<Websocket>('WEBSOCKET');
-          const allowedHosts = websocketConfig.ALLOWED_HOSTS || '127.0.0.1,::1,::ffff:127.0.0.1';
-          const allowAllHosts = allowedHosts.trim() === '*';
-          const isAllowedHost =
-            allowAllHosts ||
-            allowedHosts
-              .split(',')
-              .map((h) => h.trim())
-              .includes(remoteAddress);
-
-          if (params.has('EIO') && isAllowedHost) {
-            return callback(null, true);
-          }
-
-          const apiKey = params.get('apikey') || (req.headers.apikey as string);
-
-          if (!apiKey) {
-            this.logger.error('Connection rejected: apiKey not provided');
-            return callback('apiKey is required', false);
-          }
-
-          const instance = await this.prismaRepository.instance.findFirst({ where: { token: apiKey } });
-
-          if (!instance) {
-            const globalToken = configService.get<Auth>('AUTHENTICATION').API_KEY.KEY;
-            if (apiKey !== globalToken) {
-              this.logger.error('Connection rejected: invalid global token');
-              return callback('Invalid global token', false);
-            }
+          if (!principal) {
+            this.logger.error('Connection rejected: invalid apiKey');
+            return callback('Invalid apiKey', false);
           }
 
           callback(null, true);
@@ -71,8 +50,32 @@ export class WebsocketController extends EventController implements EventControl
       },
     });
 
+    // O handshake só diz que o token existe; cada conexão guarda DE QUEM ele é, e o namespace
+    // de uma instância só aceita o token dela ou o global.
+    const identify = async (socket: Socket, next: (err?: Error) => void) => {
+      try {
+        const apiKey = (socket.handshake.query?.apikey as string) || (socket.handshake.headers?.apikey as string);
+        socket.data.principal = await this.principalOf(apiKey, socket.handshake.address);
+        if (!socket.data.principal) return next(new Error('Invalid apiKey'));
+
+        const instanceName = socket.nsp.name.slice(1);
+        if (socket.nsp.name !== '/' && !canUseInstance(socket.data.principal, instanceName)) {
+          this.logger.error(`Connection rejected: apiKey is not from instance ${instanceName}`);
+          return next(new Error('apiKey is not from this instance'));
+        }
+        next();
+      } catch (error) {
+        next(error as Error);
+      }
+    };
+    this.socket.use(identify);
+    this.socket.of(/^\/.+$/).use(identify);
+
     this.socket.on('connection', (socket) => {
       this.logger.info('User connected');
+
+      // Eventos globais (WEBSOCKET_GLOBAL_EVENTS) trazem todas as instâncias: só para o token global.
+      if ((socket.data.principal as SocketPrincipal)?.global) socket.join(GLOBAL_EVENTS_ROOM);
 
       socket.on('disconnect', () => {
         this.logger.info('User disconnected');
@@ -80,6 +83,10 @@ export class WebsocketController extends EventController implements EventControl
 
       socket.on('sendNode', async (data) => {
         try {
+          if (!canUseInstance(socket.data.principal, data?.instanceId)) {
+            this.logger.error(`sendNode rejected: apiKey is not from instance ${data?.instanceId}`);
+            return;
+          }
           await this.waMonitor.waInstances[data.instanceId].baileysSendNode(data.stanza);
           this.logger.info('Node sent successfully');
         } catch (error) {
@@ -90,6 +97,17 @@ export class WebsocketController extends EventController implements EventControl
     });
 
     this.logger.info('Socket.io initialized');
+  }
+
+  private async principalOf(apiKey: string | undefined, remoteAddress: string | undefined) {
+    return resolvePrincipal({
+      apiKey,
+      remoteAddress,
+      allowedHosts: configService.get<Websocket>('WEBSOCKET').ALLOWED_HOSTS || '127.0.0.1,::1,::ffff:127.0.0.1',
+      globalKey: configService.get<Auth>('AUTHENTICATION').API_KEY.KEY,
+      findInstanceNameByToken: async (token) =>
+        (await this.prismaRepository.instance.findFirst({ where: { token }, select: { name: true } }))?.name ?? null,
+    });
   }
 
   private set cors(cors: Array<any>) {
@@ -142,7 +160,7 @@ export class WebsocketController extends EventController implements EventControl
     };
 
     if (configService.get<Websocket>('WEBSOCKET')?.GLOBAL_EVENTS) {
-      this.socket.emit(event, message);
+      this.socket.to(GLOBAL_EVENTS_ROOM).emit(event, message);
 
       if (logEnabled) {
         this.logger.log({ local: `${origin}.sendData-WebsocketGlobal`, ...message });
