@@ -21,9 +21,11 @@ import {
 import { isOwnInbox, mustBlockSend, pickOwnInbox } from '@api/integrations/chatbot/chatwoot/utils/inbox-selection';
 import { isolateCallsPerScope, ProviderScope } from '@api/integrations/chatbot/chatwoot/utils/provider-context';
 import {
+  belongsToInbox,
   eventMessages,
   isEvolutionEcho,
   isFromAnotherInbox,
+  signatureName,
 } from '@api/integrations/chatbot/chatwoot/utils/webhook-message';
 import { PrismaRepository } from '@api/repository/repository.service';
 import { CacheService } from '@api/services/cache.service';
@@ -873,6 +875,13 @@ export class ChatwootService {
         // vínculo uma vez para religar/mesclar. O cache fica no Redis e sobrevive a deploys.
         // Só com o número conhecido: com LID sozinho não há para onde religar, e a busca
         // não acharia o contato já religado ao número (criaria um duplicado pelo LID).
+        // Conversa de outra caixa (cache gravado por evento alheio): mensagens deste número
+        // cairiam lá, e as respostas sairiam pelo número da outra instância.
+        if (!belongsToInbox(conversationExists, (await this.getInbox(instance))?.id)) {
+          this.logger.warn(`Cached conversation ${conversationId} is from another inbox, recreating for ${remoteJid}`);
+          await this.cache.delete(cacheKey);
+          return await this.createConversation(instance, body);
+        }
         const cachedIdentifier = conversationExists.meta?.sender?.identifier;
         if (identity?.pnJid && cachedIdentifier !== identity.pnJid) {
           this.logger.verbose(`Cached conversation belongs to ${cachedIdentifier}, relinking ${remoteJid}`);
@@ -1696,6 +1705,13 @@ export class ChatwootService {
         return null;
       }
 
+      // Chatwoot desligado nesta instância: nada do Chatwoot sai por este número, mesmo que
+      // algum webhook (da caixa, da conta ou de agente-robô) ainda aponte para ela.
+      if (this.provider?.enabled === false) {
+        this.logger.warn(`Chatwoot desligado em ${instance.instanceName}: evento ${body?.event} ignorado`);
+        return { message: 'bot' };
+      }
+
       if (
         this.provider.reopenConversation === false &&
         body.event === 'conversation_status_changed' &&
@@ -1743,13 +1759,21 @@ export class ChatwootService {
             .replaceAll(/(?<!`)`((?!\s)([^`*]+?)(?<!\s))`(?!`)/g, '```$1```') // Substitui ` por ```
         : body.content;
 
-      const senderName = body?.conversation?.messages[0]?.sender?.available_name || body?.sender?.name;
+      const senderName = signatureName(body);
       const waInstance = this.waMonitor.waInstances[instance.instanceName];
       // Opcional: sem a instância a checagem mais abaixo avisa o atendente. Antes este acesso
       // lançava primeiro e o erro era engolido, sem aviso nenhum.
       instance.instanceId = waInstance?.instanceId;
 
       if (body.event === 'message_updated' && body.content_attributes?.deleted) {
+        // Sem a instância carregada o instanceId fica undefined, e o Prisma ignora o filtro:
+        // as consultas abaixo pegariam mensagens de todas as instâncias.
+        if (!instance.instanceId) {
+          this.logger.warn(
+            `Chatwoot: ${instance.instanceName} não carregada; exclusão da mensagem ${body.id} ignorada`,
+          );
+          return { message: 'bot' };
+        }
         const message = await this.prismaRepository.message.findFirst({
           where: {
             chatwootMessageId: body.id,
@@ -1983,6 +2007,7 @@ export class ChatwootService {
 
         const chatwootRead = this.configService.get<Chatwoot>('CHATWOOT').MESSAGE_READ;
         if (chatwootRead) {
+          // A última mensagem recebida DESTA conversa (antes era uma qualquer da instância).
           const lastMessage = await this.prismaRepository.message.findFirst({
             where: {
               key: {
@@ -1990,7 +2015,9 @@ export class ChatwootService {
                 equals: false,
               },
               instanceId: instance.instanceId,
+              chatwootConversationId: body.conversation.id,
             },
+            orderBy: { messageTimestamp: 'desc' },
           });
           if (lastMessage && !lastMessage.chatwootIsRead) {
             const key = lastMessage.key as WAMessageKey;

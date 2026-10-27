@@ -51,3 +51,21 @@ export function isFromAnotherInbox(body: any, instanceInboxId: number | string |
   }
   return String(eventInboxId) !== String(instanceInboxId);
 }
+
+/**
+ * Nome para assinar a mensagem (signMsg): quem escreveu a mensagem do evento. Vinha de
+ * `conversation.messages[0]`, a última da conversa, que pode ser do cliente ou de outro
+ * atendente (o mesmo erro da detecção de eco).
+ */
+export function signatureName(body: any): string | undefined {
+  return body?.sender?.available_name ?? body?.sender?.name;
+}
+
+/** A conversa (em cache) é da caixa da instância; sem saber uma das duas, não descarta. */
+export function belongsToInbox(conversation: any, inboxId: number | string | null | undefined): boolean {
+  const conversationInbox = conversation?.inbox_id;
+  if (conversationInbox === undefined || conversationInbox === null || inboxId === undefined || inboxId === null) {
+    return true;
+  }
+  return String(conversationInbox) === String(inboxId);
+}

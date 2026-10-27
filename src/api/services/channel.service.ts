@@ -365,9 +365,9 @@ export class ChannelStartupService {
   }
 
   public clearCacheChatwoot() {
-    if (this.localChatwoot?.enabled) {
-      this.chatwootService.getCache()?.deleteAll(this.instanceName);
-    }
+    // Sempre: ao desligar, `enabled` já é false aqui, e o cache antigo (provider/caixa, 7 dias)
+    // continuava fazendo a instância processar os webhooks do Chatwoot.
+    this.chatwootService.getCache()?.deleteAll(this.instanceName);
   }
 
   public async loadProxy() {

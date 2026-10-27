@@ -1,4 +1,10 @@
-import { eventMessages, isEvolutionEcho, isFromAnotherInbox } from '@api/integrations/chatbot/chatwoot/utils/webhook-message';
+import {
+  belongsToInbox,
+  eventMessages,
+  isEvolutionEcho,
+  isFromAnotherInbox,
+  signatureName,
+} from '@api/integrations/chatbot/chatwoot/utils/webhook-message';
 import assert from 'node:assert/strict';
 
 // Payload real do incidente de 26/10: a cópia do template da Cloud (raiz, source_id WAID)
@@ -57,7 +63,28 @@ function unknownInboxNeverBlocks() {
   assert.equal(isFromAnotherInbox({}, 162), false);
 }
 
+function assinaturaEhDeQuemEscreveu() {
+  // messages[0] é a última mensagem da conversa: pode ser do cliente ou de outro atendente.
+  const body = {
+    sender: { name: 'Ana', available_name: 'Ana (suporte)' },
+    conversation: { messages: [{ sender: { available_name: 'Cliente João' } }] },
+  };
+  assert.equal(signatureName(body), 'Ana (suporte)');
+  assert.equal(signatureName({ sender: { name: 'Ana' }, conversation: { messages: [{ sender: { available_name: 'X' } }] } }), 'Ana');
+  assert.equal(signatureName({ conversation: { messages: [] } }), undefined);
+}
+
+function conversaEmCacheDeOutraCaixa() {
+  assert.equal(belongsToInbox({ inbox_id: 160 }, 162), false);
+  assert.equal(belongsToInbox({ inbox_id: 162 }, 162), true);
+  assert.equal(belongsToInbox({ inbox_id: '162' }, 162), true);
+  assert.equal(belongsToInbox({}, 162), true, 'sem inbox_id não descarta');
+  assert.equal(belongsToInbox({ inbox_id: 160 }, undefined), true, 'sem a caixa da instância não descarta');
+}
+
 const tests = [
+  assinaturaEhDeQuemEscreveu,
+  conversaEmCacheDeOutraCaixa,
   eventsOfAnotherInboxAreRejected,
   unknownInboxNeverBlocks,
   echoIsDetectedByTheMessageItself,
