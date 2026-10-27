@@ -16,6 +16,7 @@ import {
   planContactLink,
   sameContactCandidates,
 } from '@api/integrations/chatbot/chatwoot/utils/contact-identity';
+import { eventMessages, isEvolutionEcho } from '@api/integrations/chatbot/chatwoot/utils/webhook-message';
 import { PrismaRepository } from '@api/repository/repository.service';
 import { CacheService } from '@api/services/cache.service';
 import { WAMonitoringService } from '@api/services/monitor.service';
@@ -1783,7 +1784,9 @@ export class ChatwootService {
       }
 
       if (body.message_type === 'outgoing' && body?.conversation?.messages?.length && chatId !== '123456') {
-        if (body?.conversation?.messages[0]?.source_id?.substring(0, 5) === 'WAID:') {
+        // Cópia gravada pela própria Evolution: não sai de novo. Precisa olhar a mensagem do
+        // evento (raiz), e não só conversation.messages[0] — ver isEvolutionEcho.
+        if (isEvolutionEcho(body)) {
           return { message: 'bot' };
         }
 
@@ -1820,7 +1823,7 @@ export class ChatwootService {
           formatText = textToConcat.join(formattedDelimiter);
         }
 
-        for (const message of body.conversation.messages) {
+        for (const message of eventMessages(body)) {
           if (message.attachments && message.attachments.length > 0) {
             for (const attachment of message.attachments) {
               if (!messageReceived) {
