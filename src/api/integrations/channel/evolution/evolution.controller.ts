@@ -1,5 +1,6 @@
 import { PrismaRepository } from '@api/repository/repository.service';
 import { WAMonitoringService } from '@api/services/monitor.service';
+import { Integration } from '@api/types/wa.types';
 import { Logger } from '@config/logger.config';
 
 import { ChannelController, ChannelControllerInterface } from '../channel.controller';
@@ -21,8 +22,10 @@ export class EvolutionController extends ChannelController implements ChannelCon
       return;
     }
 
+    // Só instâncias do canal Evolution: o mesmo número pode ser de uma instância Baileys, e o
+    // connectToWhatsapp(data) dela abriria um socket novo (reconexão forçada sem autenticação).
     const instance = await this.prismaRepository.instance.findFirst({
-      where: { number: numberId },
+      where: { number: numberId, integration: Integration.EVOLUTION },
     });
 
     if (!instance) {

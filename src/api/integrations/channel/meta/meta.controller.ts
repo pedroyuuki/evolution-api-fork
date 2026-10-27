@@ -4,6 +4,7 @@ import { Logger } from '@config/logger.config';
 import axios from 'axios';
 
 import { ChannelController, ChannelControllerInterface } from '../channel.controller';
+import { payloadForEntry } from './split-webhook';
 
 export class MetaController extends ChannelController implements ChannelControllerInterface {
   private readonly logger = new Logger('MetaController');
@@ -57,7 +58,7 @@ export class MetaController extends ChannelController implements ChannelControll
           };
         }
 
-        await this.waMonitor.waInstances[instance.name].connectToWhatsapp(data);
+        await this.waMonitor.waInstances[instance.name].connectToWhatsapp(payloadForEntry(data, entry));
 
         return {
           status: 'success',
