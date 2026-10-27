@@ -1,7 +1,9 @@
 import 'express-async-errors';
 
+import { resolveInstanceParams } from '@api/abstract/instance-params';
 import { GetParticipant, GroupInvite } from '@api/dto/group.dto';
 import { InstanceDto } from '@api/dto/instance.dto';
+import { isRoute } from '@api/guards/route-match';
 import { Logger } from '@config/logger.config';
 import { BadRequestException } from '@exceptions';
 import { Request } from 'express';
@@ -31,15 +33,12 @@ export abstract class RouterBroker {
 
     const ref = new ClassRef();
     const body = request.body;
-    const instance = request.params as unknown as InstanceDto;
-
-    if (request?.query && Object.keys(request.query).length > 0) {
-      Object.assign(instance, request.query);
-    }
-
-    if (request.originalUrl.includes('/instance/create')) {
-      Object.assign(instance, body);
-    }
+    const instance = resolveInstanceParams(
+      request.params,
+      request.query as Record<string, any>,
+      body,
+      isRoute(request, '/instance/create'),
+    );
 
     Object.assign(ref, body);
 
