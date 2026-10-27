@@ -11,6 +11,32 @@ This file provides comprehensive guidance to Claude AI when working with the Evo
 
 Built with **Node.js 20+**, **TypeScript 5+**, and **Express.js**, it provides extensive integrations with chatbots, CRM systems, and messaging platforms in a **multi-tenant architecture**.
 
+## Fluxo de desenvolvimento do fork (obrigatório)
+
+Toda mudança de comportamento segue o fluxo descrito em [docs/README.md](docs/README.md), com os documentos em `docs/superpowers/`:
+
+1. **Research** (`docs/superpowers/research/`) — reproduzir e juntar evidências antes de mexer.
+2. **Spec** (`docs/superpowers/specs/`, `superpowers:brainstorming`) — escopo, fora de escopo e a seção **Compatibilidade com produção**.
+3. **Plan** (`docs/superpowers/plans/`, `superpowers:writing-plans`) — tarefas pequenas, cada uma com seu teste.
+4. **Implementação com TDD** (`superpowers:test-driven-development`) — teste que reproduz o bug antes da correção, em `test/*.test.ts`.
+5. **Verificação** (`superpowers:verification-before-completion`) — build, lint, todos os testes e, para WhatsApp/Chatwoot, a VPS de teste; resultado em `docs/superpowers/reports/`.
+6. **Release** (`docs/superpowers/releases/<tag>.md`) — imagem, digest, commit, envs, deploy e rollback.
+7. **Pendências** (`docs/pendencias.md`) — o que foi achado e não corrigido, com gravidade e motivo.
+
+A atualização em produção tem que ser limpa: nenhuma env nova obrigatória, nenhuma reconfiguração de Chatwoot/Meta/webhooks, migrations só aditivas. `docs/private/` guarda logs e configs com segredo e nunca é versionado.
+
+### Isolamento entre instâncias (lições do incidente de 26/10)
+
+Um processo atende todas as instâncias. Estas regras evitam que uma instância envie, leia ou grave dados de outra:
+
+- **Nada de estado por requisição em objeto compartilhado.** Serviços e controllers criados uma vez (`src/api/server.module.ts`) não podem guardar a instância atual num campo (`this.provider = ...`, `this.client = ...`): um `await` deixa outra instância trocar o valor no meio. Passe como parâmetro ou use escopo por chamada (ver `chatwoot/utils/provider-context.ts`).
+- **Toda consulta Prisma filtra por `instanceId`** (findFirst, updateMany, deleteMany...). IDs do WhatsApp (`key.id`) e `remoteJid` se repetem entre instâncias: duas instâncias nossas conversando veem a mesma mensagem.
+- **`undefined` no `where` do Prisma apaga o filtro.** `{ instanceId: undefined }` vira "qualquer instância". Confira que o id existe antes de consultar; o `InstanceDto` da rota só traz `instanceName`.
+- **Chaves de cache, mapas e timers levam a instância** (`${instanceId}:${remoteJid}`), não só o contato ou o grupo.
+- **O nome da instância vem só do path (`:instanceName`)**, que é o que os guards validaram; nunca deixe query ou body sobrescrever.
+- **Webhooks de entrada (Chatwoot, Meta) confirmam que o evento é da instância** (caixa, número) antes de enviar qualquer coisa ao WhatsApp, e na dúvida não enviam.
+- Cópias que a própria Evolution gravou (Chatwoot `source_id` `WAID:`) nunca são reenviadas.
+
 ## Common Development Commands
 
 ### Build and Run
