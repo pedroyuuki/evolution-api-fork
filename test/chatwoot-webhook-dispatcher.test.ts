@@ -233,6 +233,17 @@ async function completedOrphanIsDroppedNotResent() {
   await dispatcher.stop(1_000);
 }
 
+async function jobDoneElsewhereIsNotRunAgain() {
+  // Outro processo no mesmo Redis (troca de imagem com os dois no ar) concluiu o job
+  // enquanto ele esperava na fila deste: não envia de novo.
+  const { dispatcher, store, handled } = setup({ orderWindowMs: 60 });
+  await dispatcher.accept('qa', message(1));
+  await store.markDone({ id: webhookJobId(message(1)), instanceName: 'qa' } as WebhookJob);
+  await sleep(150);
+  assert.equal(handled.length, 0, 'a mensagem já saiu pelo outro processo');
+  await dispatcher.stop(1_000);
+}
+
 async function jobsOfThisProcessAreNotRecoveredTwice() {
   const { dispatcher, handled } = setup();
   await dispatcher.accept('qa', message(1));
@@ -274,6 +285,7 @@ const tests = [
   staleRecoveredMessageBecomesNotice,
   completedOrphanIsDroppedNotResent,
   jobsOfThisProcessAreNotRecoveredTwice,
+  jobDoneElsewhereIsNotRunAgain,
   stopRefusesNewWorkAndHonorsTimeout,
   pickNextPrefersLowestMessageIdButKeepsOtherEventsFifo,
 ];

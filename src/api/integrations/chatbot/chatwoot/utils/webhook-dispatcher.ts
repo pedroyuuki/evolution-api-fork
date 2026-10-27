@@ -254,6 +254,13 @@ export class ChatwootWebhookDispatcher {
     mailbox.splice(mailbox.indexOf(job), 1);
     if (!mailbox.length) this.mailboxes.delete(queueKey);
 
+    // Outro processo no mesmo Redis pode ter concluído o job enquanto ele esperava aqui
+    // (troca de imagem com os dois no ar): já foi enviado, não envia de novo.
+    if (await this.options.store.isDone(job).catch(() => false)) {
+      await this.finish(job, false);
+      return;
+    }
+
     try {
       if (this.isExpired(job)) {
         await this.options.onExpired(job);

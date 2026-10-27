@@ -1889,6 +1889,20 @@ export class ChatwootService {
           return { message: 'bot' };
         }
 
+        // Já enviada por esta instância (webhook repetido, ou outro processo no mesmo Redis):
+        // a mensagem do Chatwoot já tem o id do WhatsApp gravado.
+        if (
+          body.event === 'message_created' &&
+          body.id &&
+          (await this.prismaRepository.message.findFirst({
+            where: { instanceId: instance.instanceId, chatwootMessageId: body.id },
+            select: { id: true },
+          }))
+        ) {
+          this.logger.warn(`Chatwoot: mensagem ${body.id} já enviada por ${instance.instanceName}; não reenvia`);
+          return { message: 'bot' };
+        }
+
         const connectionState = waInstance?.connectionStatus?.state;
         if (connectionState !== 'open' && body.conversation?.id) {
           this.logger.warn(`Instance ${instance.instanceName} is not connected (state: ${connectionState})`);
@@ -2113,7 +2127,10 @@ export class ChatwootService {
 
     if (this.isImportHistoryAvailable()) {
       try {
-        await chatwootImport.updateMessageSourceID(chatwootMessageIds.messageId, key.id);
+        await chatwootImport.updateMessageSourceID(chatwootMessageIds.messageId, key.id, {
+          accountId: (await this.getProvider(instance))?.accountId,
+          inboxId: (await this.getInbox(instance))?.id,
+        });
       } catch (error) {
         this.logger.error(`Error updating Chatwoot message source ID: ${error}`);
       }

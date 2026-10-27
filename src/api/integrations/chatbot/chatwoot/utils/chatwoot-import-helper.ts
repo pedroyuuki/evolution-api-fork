@@ -2,6 +2,7 @@ import { InstanceDto } from '@api/dto/instance.dto';
 import { ChatwootDto } from '@api/integrations/chatbot/chatwoot/dto/chatwoot.dto';
 import { postgresClient } from '@api/integrations/chatbot/chatwoot/libs/postgres.client';
 import { ChatwootService } from '@api/integrations/chatbot/chatwoot/services/chatwoot.service';
+import { existingSourceIdsQuery, sourceIdUpdateQuery } from '@api/integrations/chatbot/chatwoot/utils/chatwoot-sql';
 import { Chatwoot, configService } from '@config/env.config';
 import { Logger } from '@config/logger.config';
 import { inbox } from '@figuro/chatwoot-sdk';
@@ -176,7 +177,11 @@ class ChatwootImport {
     }
   }
 
-  public async getExistingSourceIds(sourceIds: string[], conversationId?: number): Promise<Set<string>> {
+  public async getExistingSourceIds(
+    sourceIds: string[],
+    conversationId?: number,
+    inboxId?: number,
+  ): Promise<Set<string>> {
     try {
       const existingSourceIdsSet = new Set<string>();
 
@@ -188,13 +193,9 @@ class ChatwootImport {
       const formattedSourceIds = sourceIds.map((sourceId) => `WAID:${sourceId.replace('WAID:', '')}`);
       const pgClient = postgresClient.getChatwootConnection();
 
-      const params = conversationId ? [formattedSourceIds, conversationId] : [formattedSourceIds];
+      const { sql, params } = existingSourceIdsQuery(formattedSourceIds, { conversationId, inboxId });
 
-      const query = conversationId
-        ? 'SELECT source_id FROM messages WHERE source_id = ANY($1) AND conversation_id = $2'
-        : 'SELECT source_id FROM messages WHERE source_id = ANY($1)';
-
-      const result = await pgClient.query(query, params);
+      const result = await pgClient.query(sql, params);
       for (const row of result.rows) {
         existingSourceIdsSet.add(row.source_id);
       }
@@ -253,7 +254,11 @@ class ChatwootImport {
         });
       });
 
-      const existingSourceIds = await this.getExistingSourceIds(messagesOrdered.map((message: any) => message.key.id));
+      const existingSourceIds = await this.getExistingSourceIds(
+        messagesOrdered.map((message: any) => message.key.id),
+        undefined,
+        inbox.id,
+      );
       messagesOrdered = messagesOrdered.filter((message: any) => !existingSourceIds.has(message.key.id));
       // processing messages in batch
       const batchSize = 4000;
@@ -567,12 +572,18 @@ class ChatwootImport {
     return this.isGroup(remoteJid) || remoteJid === 'status@broadcast' || remoteJid === '0@s.whatsapp.net';
   }
 
-  public updateMessageSourceID(messageId: string | number, sourceId: string) {
-    const pgClient = postgresClient.getChatwootConnection();
+  public updateMessageSourceID(
+    messageId: string | number,
+    sourceId: string,
+    scope: { accountId: number | string | undefined; inboxId: number | undefined },
+  ) {
+    const query = sourceIdUpdateQuery(messageId, sourceId, scope);
+    if (!query) {
+      this.logger.warn(`updateMessageSourceID: sem conta/caixa da instância, mensagem ${messageId} não atualizada`);
+      return;
+    }
 
-    const sql = `UPDATE messages SET source_id = $1, status = 0, created_at = NOW(), updated_at = NOW() WHERE id = $2;`;
-
-    return pgClient.query(sql, [`WAID:${sourceId}`, messageId]);
+    return postgresClient.getChatwootConnection().query(query.sql, query.params);
   }
 }
 
