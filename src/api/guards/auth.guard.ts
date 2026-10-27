@@ -1,4 +1,5 @@
 import { InstanceDto } from '@api/dto/instance.dto';
+import { isRoute } from '@api/guards/route-match';
 import { prismaRepository } from '@api/server.module';
 import { Auth, configService, Database } from '@config/env.config';
 import { Logger } from '@config/logger.config';
@@ -20,7 +21,7 @@ async function apikey(req: Request, _: Response, next: NextFunction) {
     return next();
   }
 
-  if ((req.originalUrl.includes('/instance/create') || req.originalUrl.includes('/instance/fetchInstances')) && !key) {
+  if ((isRoute(req, '/instance/create') || isRoute(req, '/instance/fetchInstances')) && !key) {
     throw new ForbiddenException('Missing global api key', 'The global api key must be set');
   }
   const param = req.params as unknown as InstanceDto;
@@ -34,7 +35,7 @@ async function apikey(req: Request, _: Response, next: NextFunction) {
         return next();
       }
     } else {
-      if (req.originalUrl.includes('/instance/fetchInstances') && db.SAVE_DATA.INSTANCE) {
+      if (isRoute(req, '/instance/fetchInstances') && db.SAVE_DATA.INSTANCE) {
         const instanceByKey = await prismaRepository.instance.findFirst({
           where: { token: key },
         });
