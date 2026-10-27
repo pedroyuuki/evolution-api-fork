@@ -18,6 +18,7 @@ import {
   planContactLink,
   sameContactCandidates,
 } from '@api/integrations/chatbot/chatwoot/utils/contact-identity';
+import { isOwnInbox, mustBlockSend, pickOwnInbox } from '@api/integrations/chatbot/chatwoot/utils/inbox-selection';
 import { isolateCallsPerScope, ProviderScope } from '@api/integrations/chatbot/chatwoot/utils/provider-context';
 import {
   eventMessages,
@@ -1110,8 +1111,8 @@ export class ChatwootService {
     if (await this.cache.has(cacheKey)) {
       const cached = (await this.cache.get(cacheKey)) as inbox;
       // Caixa gravada por uma versão com a disputa pelo provider: pode ser a de outra
-      // instância. Só vale se o nome bater com o configurado.
-      if (cached && (!nameInbox || cached.name === nameInbox)) {
+      // instância. Só vale se for desta (pelo nome configurado ou pela URL do webhook).
+      if (cached && (!nameInbox || isOwnInbox(cached as any, instance.instanceName, nameInbox))) {
         return cached;
       }
       this.logger.warn(
@@ -1136,15 +1137,22 @@ export class ChatwootService {
       return null;
     }
 
-    const findByName = inbox.payload.find((inbox) => inbox.name === nameInbox);
+    const { inbox: ownInbox, ambiguous } = pickOwnInbox(inbox.payload, instance.instanceName, nameInbox);
 
-    if (!findByName) {
-      this.logger.warn('inbox not found');
+    if (!ownInbox) {
+      this.logger.warn(`Chatwoot: nenhuma caixa "${nameInbox}" nem apontando para ${instance.instanceName}`);
       return null;
     }
 
-    this.cache.set(cacheKey, findByName);
-    return findByName;
+    if (ambiguous) {
+      this.logger.error(
+        `Chatwoot: mais de uma caixa serve para ${instance.instanceName} ("${nameInbox}"); usando a ${ownInbox.id}. ` +
+          'Renomeie as caixas repetidas ou corrija a URL do webhook delas',
+      );
+    }
+
+    this.cache.set(cacheKey, ownInbox);
+    return ownInbox;
   }
 
   public async createMessage(
@@ -1672,6 +1680,10 @@ export class ChatwootService {
     const conversationId = body?.conversation?.id;
     if (!isAgentMessage || !conversationId) return;
 
+    // Não escreve em conversa de outra caixa (nem quando não sabe a caixa da instância).
+    const ownInbox = await this.getInbox(instance);
+    if (mustBlockSend(ownInbox?.id) || isFromAnotherInbox(body, ownInbox?.id)) return;
+
     await this.onSendMessageError(instance, conversationId, { message: reason });
   }
 
@@ -1705,6 +1717,13 @@ export class ChatwootService {
       // Só a própria caixa: um evento de outra caixa (webhook da conta ou de agente-robô
       // apontado para esta instância) não pode sair por este número.
       const ownInbox = await this.getInbox(instance);
+      if (mustBlockSend(ownInbox?.id)) {
+        this.logger.error(
+          `Chatwoot: caixa da instância ${instance.instanceName} não encontrada; evento da conversa ` +
+            `${body.conversation?.id} não enviado (sem a caixa não dá para conferir de quem ele é)`,
+        );
+        return { message: 'bot' };
+      }
       if (isFromAnotherInbox(body, ownInbox?.id)) {
         this.logger.warn(
           `Chatwoot: evento da caixa ${body?.inbox?.id ?? body?.conversation?.inbox_id} ignorado pela instância ` +
