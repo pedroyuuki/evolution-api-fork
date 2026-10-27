@@ -1,3 +1,5 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
+
 import { InstanceDto } from '@api/dto/instance.dto';
 import { Options, Quoted, SendAudioDto, SendMediaDto, SendTextDto } from '@api/dto/sendMessage.dto';
 import { ChatwootDto } from '@api/integrations/chatbot/chatwoot/dto/chatwoot.dto';
@@ -16,6 +18,7 @@ import {
   planContactLink,
   sameContactCandidates,
 } from '@api/integrations/chatbot/chatwoot/utils/contact-identity';
+import { isolateCallsPerScope, ProviderScope } from '@api/integrations/chatbot/chatwoot/utils/provider-context';
 import {
   eventMessages,
   isEvolutionEcho,
@@ -71,20 +74,41 @@ const CLOUD_API_MEDIA_LIMITS: Record<string, number> = {
   sticker: 500 * 1024, // 500 KB
 };
 
+/** Escopo assíncrono de cada chamada ao serviço: guarda o provider da instância em uso. */
+const providerScope = new AsyncLocalStorage<ProviderScope>();
+
 export class ChatwootService {
   private readonly logger = new Logger('ChatwootService');
 
   // Lock polling delay
   private readonly LOCK_POLLING_DELAY_MS = 300; // Delay between lock status checks
 
-  private provider: any;
+  /**
+   * Configuração do Chatwoot da instância em uso NESTA chamada. Era um campo compartilhado
+   * por todas as instâncias: com processamento simultâneo, um `await` deixava outra
+   * instância trocá-lo no meio (ver isolateCallsPerScope). Fora de um escopo, vale o último
+   * valor gravado, como antes.
+   */
+  private lastProvider: any;
+
+  private get provider(): any {
+    return providerScope.getStore()?.provider ?? this.lastProvider;
+  }
+
+  private set provider(value: any) {
+    const scope = providerScope.getStore();
+    if (scope) scope.provider = value;
+    this.lastProvider = value;
+  }
 
   constructor(
     private readonly waMonitor: WAMonitoringService,
     private readonly configService: ConfigService,
     private readonly prismaRepository: PrismaRepository,
     private readonly cache: CacheService,
-  ) {}
+  ) {
+    isolateCallsPerScope(this, providerScope);
+  }
 
   private pgClient = postgresClient.getChatwootConnection();
 
@@ -1079,9 +1103,21 @@ export class ChatwootService {
   }
 
   public async getInbox(instance: InstanceDto): Promise<inbox | null> {
+    // O nome da caixa vem da configuração DESTA instância, não do estado do serviço.
+    const nameInbox = (await this.getProvider(instance))?.nameInbox;
+
     const cacheKey = `${instance.instanceName}:getInbox`;
     if (await this.cache.has(cacheKey)) {
-      return (await this.cache.get(cacheKey)) as inbox;
+      const cached = (await this.cache.get(cacheKey)) as inbox;
+      // Caixa gravada por uma versão com a disputa pelo provider: pode ser a de outra
+      // instância. Só vale se o nome bater com o configurado.
+      if (cached && (!nameInbox || cached.name === nameInbox)) {
+        return cached;
+      }
+      this.logger.warn(
+        `Chatwoot: cache da caixa de ${instance.instanceName} apontava para "${cached?.name}", esperado "${nameInbox}"; refazendo`,
+      );
+      await this.cache.delete(cacheKey);
     }
 
     const client = await this.clientCw(instance);
@@ -1100,7 +1136,7 @@ export class ChatwootService {
       return null;
     }
 
-    const findByName = inbox.payload.find((inbox) => inbox.name === this.getClientCwConfig().nameInbox);
+    const findByName = inbox.payload.find((inbox) => inbox.name === nameInbox);
 
     if (!findByName) {
       this.logger.warn('inbox not found');
