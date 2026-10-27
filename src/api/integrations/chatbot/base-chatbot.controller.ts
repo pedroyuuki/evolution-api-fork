@@ -10,6 +10,7 @@ import { getConversationMessage } from '@utils/getConversationMessage';
 
 import { BaseChatbotDto } from './base-chatbot.dto';
 import { ChatbotController, ChatbotControllerInterface, EmitData } from './chatbot.controller';
+import { debounceKey } from './utils/debounce-key';
 
 // Common settings interface for all chatbot integrations
 export interface ChatbotSettings {
@@ -280,7 +281,9 @@ export abstract class BaseChatbotController<BotType = any, BotData extends BaseC
         },
       });
 
-      if (!bot) {
+      // Só o bot desta instância: o id de um bot de outra devolvia a URL, apiKey e senha dela.
+      const instanceId = this.waMonitor.waInstances[instance.instanceName]?.instanceId;
+      if (!bot || !instanceId || bot.instanceId !== instanceId) {
         return null;
       }
 
@@ -447,7 +450,8 @@ export abstract class BaseChatbotController<BotType = any, BotData extends BaseC
 
       const remoteJid = data.remoteJid;
       const status = data.status;
-      const session = await this.getSession(remoteJid, instance);
+      // getSession filtra pelo instanceId: o DTO da rota só traz o nome.
+      const session = await this.getSession(remoteJid, { ...instance, instanceId });
 
       if (this.integrationName === 'Typebot') {
         const typebotData = {
@@ -461,6 +465,7 @@ export abstract class BaseChatbotController<BotType = any, BotData extends BaseC
       if (status === 'delete') {
         await this.sessionRepository.deleteMany({
           where: {
+            instanceId,
             remoteJid: remoteJid,
             botId: { not: null },
           },
@@ -473,6 +478,7 @@ export abstract class BaseChatbotController<BotType = any, BotData extends BaseC
         if (defaultSettingCheck?.keepOpen) {
           await this.sessionRepository.updateMany({
             where: {
+              instanceId,
               remoteJid: remoteJid,
               botId: { not: null },
             },
@@ -483,6 +489,7 @@ export abstract class BaseChatbotController<BotType = any, BotData extends BaseC
         } else {
           await this.sessionRepository.deleteMany({
             where: {
+              instanceId,
               remoteJid: remoteJid,
               botId: { not: null },
             },
@@ -919,7 +926,8 @@ export abstract class BaseChatbotController<BotType = any, BotData extends BaseC
 
       // Process with debounce if needed
       if (debounceTime && debounceTime > 0) {
-        this.processDebounce(this.userMessageDebounce, content, remoteJid, debounceTime, async (debouncedContent) => {
+        const key = debounceKey(instance.instanceId, remoteJid);
+        this.processDebounce(this.userMessageDebounce, content, key, debounceTime, async (debouncedContent) => {
           await this.processBot(
             this.waMonitor.waInstances[instance.instanceName],
             remoteJid,

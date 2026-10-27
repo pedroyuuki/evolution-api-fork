@@ -33,7 +33,6 @@ export class OpenaiController extends BaseChatbotController<OpenaiBot, OpenaiDto
   settingsRepository: any;
   sessionRepository: any;
   userMessageDebounce: { [key: string]: { message: string; timeoutId: NodeJS.Timeout } } = {};
-  private client: OpenAI;
   private credsRepository: any;
 
   protected getFallbackBotId(settings: any): string | undefined {
@@ -469,9 +468,9 @@ export class OpenaiController extends BaseChatbotController<OpenaiBot, OpenaiDto
     }
 
     try {
-      this.client = new OpenAI({ apiKey });
+      const client = new OpenAI({ apiKey });
 
-      const models: any = await this.client.models.list();
+      const models: any = await client.models.list();
 
       return models?.body?.data;
     } catch (error) {

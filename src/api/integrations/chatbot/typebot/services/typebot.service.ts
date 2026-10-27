@@ -1,7 +1,7 @@
 import { PrismaRepository } from '@api/repository/repository.service';
 import { WAMonitoringService } from '@api/services/monitor.service';
 import { Events } from '@api/types/wa.types';
-import { Auth, ConfigService, HttpServer, Typebot } from '@config/env.config';
+import { ConfigService, HttpServer, Typebot } from '@config/env.config';
 import { Instance, IntegrationSession, Message, Typebot as TypebotModel } from '@prisma/client';
 import { getConversationMessage } from '@utils/getConversationMessage';
 import { sendTelemetry } from '@utils/sendTelemetry';
@@ -100,7 +100,7 @@ export class TypebotService extends BaseChatbotService<TypebotModel, any> {
             pushName: data.pushName || data.prefilledVariables?.pushName || '',
             instanceName: instance.name,
             serverUrl: this.configService.get<HttpServer>('SERVER').URL,
-            apiKey: this.configService.get<Auth>('AUTHENTICATION').API_KEY.KEY,
+            apiKey: instance.token, // token da instância, nunca a chave global (a URL do bot é de quem configura)
             ownerJid: instance.number,
           },
         };
@@ -116,7 +116,7 @@ export class TypebotService extends BaseChatbotService<TypebotModel, any> {
               pushName: data.pushName || data.prefilledVariables?.pushName || '',
               instanceName: instance.name,
               serverUrl: this.configService.get<HttpServer>('SERVER').URL,
-              apiKey: this.configService.get<Auth>('AUTHENTICATION').API_KEY.KEY,
+              apiKey: instance.token, // token da instância, nunca a chave global (a URL do bot é de quem configura)
               ownerJid: instance.number,
             },
           },
@@ -138,7 +138,7 @@ export class TypebotService extends BaseChatbotService<TypebotModel, any> {
               pushName: data.pushName || '',
               instanceName: instance.name,
               serverUrl: this.configService.get<HttpServer>('SERVER').URL,
-              apiKey: this.configService.get<Auth>('AUTHENTICATION').API_KEY.KEY,
+              apiKey: instance.token, // token da instância, nunca a chave global (a URL do bot é de quem configura)
               ownerJid: instance.number,
             },
             awaitUser: false,
@@ -988,7 +988,8 @@ export class TypebotService extends BaseChatbotService<TypebotModel, any> {
     if (this.isAudioMessage(content) && msg) {
       try {
         this.logger.debug(`[TypeBot] Downloading audio for Whisper transcription`);
-        const transcription = await this.openaiService.speechToText(msg, instance);
+        // `instance` aqui é a linha do Prisma (`id`), e speechToText procura por `instanceId`.
+        const transcription = await this.openaiService.speechToText(msg, { instanceId: instance.id });
         if (transcription) {
           reqData.message = `[audio] ${transcription}`;
         }
