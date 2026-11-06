@@ -34,6 +34,8 @@ import FormData from 'form-data';
 import mimeTypes from 'mime-types';
 import { join } from 'path';
 
+import { buildStatusUpdate } from './status-update';
+
 export class BusinessStartupService extends ChannelStartupService {
   constructor(
     public readonly configService: ConfigService,
@@ -886,135 +888,150 @@ export class BusinessStartupService extends ChannelStartupService {
         });
       }
       if (received.statuses) {
-        for await (const item of received.statuses) {
-          const remoteId = item?.recipient_id ?? this.phoneNumber;
-          if (!remoteId) continue;
-
-          const key: any = {
-            id: item.id,
-            remoteJid: createJid(remoteId),
-            fromMe: this.isCloudApiStatusFromMe(item, received),
-          };
-          if (settings?.groups_ignore && key.remoteJid.includes('@g.us')) {
-            return;
-          }
-          if (key.remoteJid !== 'status@broadcast' && !key?.remoteJid?.match(/(:\d+)/)) {
-            const findMessage = await this.prismaRepository.message.findFirst({
-              where: {
-                instanceId: this.instanceId,
-                key: {
-                  path: ['id'],
-                  equals: key.id,
-                },
-              },
-            });
-
-            if (!findMessage) {
-              return;
-            }
-
-            const findMessageKey: any = findMessage?.key ?? {};
-            if (findMessageKey?.remoteJid) {
-              key.remoteJid = findMessageKey.remoteJid;
-            }
-            if (typeof findMessageKey?.fromMe === 'boolean') {
-              key.fromMe = findMessageKey.fromMe;
-            }
-
-            if (item.message === null && item.status === undefined) {
-              this.sendDataWebhook(Events.MESSAGES_DELETE, key);
-
-              const message: any = {
-                messageId: findMessage.id,
-                keyId: key.id,
-                remoteJid: key.remoteJid,
-                fromMe: key.fromMe,
-                participant: key?.remoteJid,
-                status: 'DELETED',
-                instanceId: this.instanceId,
-              };
-
-              await this.prismaRepository.messageUpdate.create({
-                data: message,
-              });
-
-              if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED && this.localChatwoot?.enabled) {
-                this.chatwootService.eventWhatsapp(
-                  Events.MESSAGES_DELETE,
-                  { instanceName: this.instance.name, instanceId: this.instanceId },
-                  { key: key },
-                );
-              }
-
-              return;
-            }
-
-            const messageStatus = item.status.toUpperCase();
-            const isFailed = messageStatus === 'FAILED';
-
-            const message: any = {
-              messageId: findMessage.id,
-              keyId: key.id,
-              remoteJid: key.remoteJid,
-              fromMe: key.fromMe,
-              participant: key?.remoteJid,
-              status: messageStatus,
-              instanceId: this.instanceId,
-            };
-
-            if (isFailed && item.errors && item.errors.length > 0) {
-              const errorInfo = item.errors[0];
-              message.error = {
-                code: errorInfo.code,
-                title: errorInfo.title,
-                message: errorInfo.message,
-                details: errorInfo.error_data?.details,
-                href: errorInfo.href,
-              };
-
-              this.logger.warn(
-                `[Cloud API] Mensagem falhou - ID: ${key.id}, Código: ${errorInfo.code}, Motivo: ${errorInfo.error_data?.details || errorInfo.message}`,
-              );
-            }
-
-            this.sendDataWebhook(Events.MESSAGES_UPDATE, message);
-
-            if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED && this.localChatwoot?.enabled) {
-              this.chatwootService.eventWhatsapp(
-                Events.MESSAGES_UPDATE,
-                { instanceName: this.instance.name, instanceId: this.instanceId },
-                message,
-              );
-            }
-
-            await this.prismaRepository.messageUpdate.create({
-              data: {
-                messageId: findMessage.id,
-                keyId: key.id,
-                remoteJid: key.remoteJid,
-                fromMe: key.fromMe,
-                participant: key?.remoteJid,
-                status: messageStatus,
-                instanceId: this.instanceId,
-              },
-            });
-
-            if (isFailed || messageStatus !== findMessage.status) {
-              await this.prismaRepository.message.update({
-                where: { id: findMessage.id },
-                data: { status: messageStatus },
-              });
-            }
-
-            if (findMessage.webhookUrl) {
-              await axios.post(findMessage.webhookUrl, message);
-            }
+        // Um status por vez: o que não se aplica (mensagem desconhecida, grupo ignorado) não
+        // pode descartar os seguintes do mesmo POST, como fazia o return dentro do laço.
+        for (const item of received.statuses) {
+          try {
+            await this.handleStatusItem(item, received, settings);
+          } catch (error) {
+            this.logger.error(error);
           }
         }
       }
     } catch (error) {
       this.logger.error(error);
     }
+  }
+
+  /** Um item de `statuses` do webhook da Meta. Cada `return` encerra só este item. */
+  private async handleStatusItem(item: any, received: any, settings: any) {
+    const remoteId = item?.recipient_id ?? this.phoneNumber;
+    if (!remoteId) return;
+
+    const key: any = {
+      id: item.id,
+      remoteJid: createJid(remoteId),
+      fromMe: this.isCloudApiStatusFromMe(item, received),
+    };
+    if (settings?.groups_ignore && key.remoteJid.includes('@g.us')) {
+      return;
+    }
+    if (key.remoteJid !== 'status@broadcast' && !key?.remoteJid?.match(/(:\d+)/)) {
+      const findMessage = await this.findMessageByKeyId(key.id);
+
+      if (!findMessage) {
+        return;
+      }
+
+      const findMessageKey: any = findMessage?.key ?? {};
+      if (findMessageKey?.remoteJid) {
+        key.remoteJid = findMessageKey.remoteJid;
+      }
+      if (typeof findMessageKey?.fromMe === 'boolean') {
+        key.fromMe = findMessageKey.fromMe;
+      }
+
+      if (item.message === null && item.status === undefined) {
+        this.sendDataWebhook(Events.MESSAGES_DELETE, key);
+
+        const message: any = {
+          messageId: findMessage.id,
+          keyId: key.id,
+          remoteJid: key.remoteJid,
+          fromMe: key.fromMe,
+          participant: key?.remoteJid,
+          status: 'DELETED',
+          instanceId: this.instanceId,
+        };
+
+        await this.prismaRepository.messageUpdate.create({
+          data: message,
+        });
+
+        if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED && this.localChatwoot?.enabled) {
+          this.chatwootService.eventWhatsapp(
+            Events.MESSAGES_DELETE,
+            { instanceName: this.instance.name, instanceId: this.instanceId },
+            { key: key },
+          );
+        }
+
+        return;
+      }
+
+      const messageStatus = item.status.toUpperCase();
+      const isFailed = messageStatus === 'FAILED';
+
+      const message: any = buildStatusUpdate(
+        {
+          messageId: findMessage.id,
+          keyId: key.id,
+          remoteJid: key.remoteJid,
+          fromMe: key.fromMe,
+          participant: key?.remoteJid,
+          instanceId: this.instanceId,
+        },
+        item,
+      );
+
+      if (message.error) {
+        this.logger.warn(
+          `[Cloud API] Mensagem falhou - ID: ${key.id}, Código: ${message.error.code}, Motivo: ${message.error.details || message.error.message}`,
+        );
+      }
+
+      this.sendDataWebhook(Events.MESSAGES_UPDATE, message);
+
+      if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED && this.localChatwoot?.enabled) {
+        this.chatwootService.eventWhatsapp(
+          Events.MESSAGES_UPDATE,
+          { instanceName: this.instance.name, instanceId: this.instanceId },
+          message,
+        );
+      }
+
+      await this.prismaRepository.messageUpdate.create({
+        data: {
+          messageId: findMessage.id,
+          keyId: key.id,
+          remoteJid: key.remoteJid,
+          fromMe: key.fromMe,
+          participant: key?.remoteJid,
+          status: messageStatus,
+          instanceId: this.instanceId,
+          errors: message.errors ?? undefined,
+        },
+      });
+
+      if (isFailed || messageStatus !== findMessage.status) {
+        await this.prismaRepository.message.update({
+          where: { id: findMessage.id },
+          data: { status: messageStatus },
+        });
+      }
+
+      if (findMessage.webhookUrl) {
+        await axios.post(findMessage.webhookUrl, message);
+      }
+    }
+  }
+
+  /**
+   * Mensagem desta instância pelo id do WhatsApp. No Postgres usa o índice
+   * (instanceId, key->>'id'): a busca roda a cada status e, sem ele, varria a tabela.
+   */
+  private async findMessageByKeyId(keyId: string): Promise<any> {
+    if (this.configService.get<Database>('DATABASE').PROVIDER === 'mysql') {
+      return this.prismaRepository.message.findFirst({
+        where: { instanceId: this.instanceId, key: { path: ['id'], equals: keyId } },
+      });
+    }
+    const rows = (await this.prismaRepository.$queryRaw`
+      SELECT * FROM "Message"
+      WHERE "instanceId" = ${this.instanceId} AND "key"->>'id' = ${keyId}
+      LIMIT 1
+    `) as any[];
+    return rows[0] ?? null;
   }
 
   private convertMessageToRaw(message: any, content: any) {
