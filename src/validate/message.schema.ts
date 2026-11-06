@@ -34,6 +34,8 @@ export const templateMessageSchema: JSONSchema7 = {
     language: { type: 'string' },
     components: { type: 'array' },
     webhookUrl: { type: 'string' },
+    emitWebhook: { type: 'boolean' },
+    chatwoot: { type: 'boolean' },
   },
   required: ['name', 'language'],
 };

@@ -1,3 +1,4 @@
+import { DispatchOptions } from '@api/integrations/channel/meta/dispatch-options';
 import { proto, WAPresence } from 'baileys';
 
 export class Quoted {
@@ -14,6 +15,8 @@ export class Options {
   mentionsEveryOne?: boolean;
   mentioned?: string[];
   webhookUrl?: string;
+  /** Opções de disparo em massa (só sendTemplate da Cloud API); null = padrão. */
+  dispatch?: DispatchOptions | null;
 }
 
 export class MediaMessage {
@@ -158,6 +161,10 @@ export class SendTemplateDto extends Metadata {
   language: string;
   components: any;
   webhookUrl?: string;
+  /** false: não emite SEND_MESSAGE/MESSAGES_UPDATE nos eventos da instância (o webhookUrl recebe). */
+  emitWebhook?: boolean;
+  /** false: não leva o envio ao Chatwoot (entra antes da resposta do cliente, se ele responder). */
+  chatwoot?: boolean;
 }
 export class SendContactDto extends Metadata {
   contact: ContactMessage[];

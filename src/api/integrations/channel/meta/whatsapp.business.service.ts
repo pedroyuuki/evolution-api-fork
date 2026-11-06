@@ -34,6 +34,7 @@ import FormData from 'form-data';
 import mimeTypes from 'mime-types';
 import { join } from 'path';
 
+import { dispatchColumns, dispatchOptions, optionsFromRow, resolveRecipientNumber } from './dispatch-options';
 import { buildStatusUpdate } from './status-update';
 
 export class BusinessStartupService extends ChannelStartupService {
@@ -931,8 +932,11 @@ export class BusinessStartupService extends ChannelStartupService {
         key.fromMe = findMessageKey.fromMe;
       }
 
+      // Opções do disparo gravadas na mensagem (linhas antigas = padrão).
+      const dispatch = optionsFromRow(findMessage);
+
       if (item.message === null && item.status === undefined) {
-        this.sendDataWebhook(Events.MESSAGES_DELETE, key);
+        if (dispatch.emitWebhook) this.sendDataWebhook(Events.MESSAGES_DELETE, key);
 
         const message: any = {
           messageId: findMessage.id,
@@ -948,7 +952,7 @@ export class BusinessStartupService extends ChannelStartupService {
           data: message,
         });
 
-        if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED && this.localChatwoot?.enabled) {
+        if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED && this.localChatwoot?.enabled && dispatch.chatwoot) {
           this.chatwootService.eventWhatsapp(
             Events.MESSAGES_DELETE,
             { instanceName: this.instance.name, instanceId: this.instanceId },
@@ -980,9 +984,9 @@ export class BusinessStartupService extends ChannelStartupService {
         );
       }
 
-      this.sendDataWebhook(Events.MESSAGES_UPDATE, message);
+      if (dispatch.emitWebhook) this.sendDataWebhook(Events.MESSAGES_UPDATE, message);
 
-      if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED && this.localChatwoot?.enabled) {
+      if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED && this.localChatwoot?.enabled && dispatch.chatwoot) {
         this.chatwootService.eventWhatsapp(
           Events.MESSAGES_UPDATE,
           { instanceName: this.instance.name, instanceId: this.instanceId },
@@ -1341,7 +1345,11 @@ export class BusinessStartupService extends ChannelStartupService {
       }
 
       const messageRaw: any = {
-        key: { fromMe: true, id: messageSent?.messages[0]?.id, remoteJid: createJid(number) },
+        key: {
+          fromMe: true,
+          id: messageSent?.messages[0]?.id,
+          remoteJid: createJid(resolveRecipientNumber(number, messageSent, options?.dispatch)),
+        },
         message: this.convertMessageToRaw(message, content),
         messageType: this.renderMessageType(content.type),
         messageTimestamp: (messageSent?.messages[0]?.timestamp as number) || Math.round(new Date().getTime() / 1000),
@@ -1359,12 +1367,22 @@ export class BusinessStartupService extends ChannelStartupService {
       this.logger.log(storedMessage);
 
       await this.prismaRepository.message.create({
-        data: storedMessage,
+        data: { ...storedMessage, ...dispatchColumns(options?.dispatch) },
       });
 
-      this.sendDataWebhook(Events.SEND_MESSAGE, messageRaw);
+      // Disparo em massa: sem eventos da instância e/ou sem Chatwoot (ver dispatch-options).
+      const dispatch = options?.dispatch;
 
-      if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED && this.localChatwoot?.enabled && !isIntegration) {
+      if (dispatch?.emitWebhook !== false) {
+        this.sendDataWebhook(Events.SEND_MESSAGE, messageRaw);
+      }
+
+      if (
+        this.configService.get<Chatwoot>('CHATWOOT').ENABLED &&
+        this.localChatwoot?.enabled &&
+        !isIntegration &&
+        dispatch?.chatwoot !== false
+      ) {
         this.chatwootService.eventWhatsapp(
           Events.SEND_MESSAGE,
           { instanceName: this.instance.name, instanceId: this.instanceId },
@@ -1766,6 +1784,7 @@ export class BusinessStartupService extends ChannelStartupService {
         mentionsEveryOne: data?.mentionsEveryOne,
         mentioned: data?.mentioned,
         webhookUrl: data?.webhookUrl,
+        dispatch: dispatchOptions(data),
       },
       isIntegration,
     );
