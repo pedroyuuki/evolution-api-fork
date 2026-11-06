@@ -23,6 +23,7 @@ import { Events, wa } from '@api/types/wa.types';
 import { AudioConverter, Chatwoot, ConfigService, Database, Openai, S3, WaBusiness } from '@config/env.config';
 import { BadRequestException, InternalServerErrorException } from '@exceptions';
 import { createJid } from '@utils/createJid';
+import { KeyedMutex } from '@utils/keyedMutex';
 import { omitInlineMedia } from '@utils/omitInlineMedia';
 import { prepareAudioForCloudApi } from '@utils/prepareAudioForCloudApi';
 import { status } from '@utils/renderStatus';
@@ -34,6 +35,7 @@ import FormData from 'form-data';
 import mimeTypes from 'mime-types';
 import { join } from 'path';
 
+import { DispatchCandidate, pickDispatchForSync } from './dispatch-context';
 import { dispatchColumns, dispatchOptions, optionsFromRow, resolveRecipientNumber } from './dispatch-options';
 import { buildStatusUpdate } from './status-update';
 
@@ -52,6 +54,8 @@ export class BusinessStartupService extends ChannelStartupService {
 
   public stateConnection: wa.StateConnection = { state: 'open' };
   private webhookConfigLoaded = false;
+  // Mensagens de um mesmo contato esperam a sincronização do disparo dele (ver syncDispatchBeforeReply).
+  private readonly dispatchMutex = new KeyedMutex();
 
   public phoneNumber: string;
   public mobile: boolean;
@@ -821,6 +825,9 @@ export class BusinessStartupService extends ChannelStartupService {
         });
 
         if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED && this.localChatwoot?.enabled) {
+          // Resposta a um disparo feito sem Chatwoot: a mensagem do disparo entra antes.
+          if (!messageRaw.key?.fromMe) await this.syncDispatchBeforeReply(messageRaw.key.remoteJid);
+
           const chatwootSentMessage = await this.chatwootService.eventWhatsapp(
             Events.MESSAGES_UPSERT,
             { instanceName: this.instance.name, instanceId: this.instanceId },
@@ -1018,6 +1025,104 @@ export class BusinessStartupService extends ChannelStartupService {
         await axios.post(findMessage.webhookUrl, message);
       }
     }
+  }
+
+  /**
+   * Leva ao Chatwoot, antes da resposta do cliente, o disparo enviado a ele com chatwoot:false
+   * (o atendente vê o que foi enviado). Uma vez só por disparo: a reserva é atômica e as
+   * mensagens seguintes do mesmo contato esperam aqui (KeyedMutex). Qualquer erro só vai para
+   * o log: a resposta do cliente segue para o Chatwoot de qualquer jeito.
+   */
+  private async syncDispatchBeforeReply(remoteJid: string) {
+    const windowHours = this.configService.get<Chatwoot>('CHATWOOT').DISPATCH_CONTEXT_HOURS;
+    await this.dispatchMutex.runExclusive(
+      remoteJid,
+      async () => {
+        let claimed: string | null = null;
+        try {
+          const nowSec = Math.round(Date.now() / 1000);
+          const candidates = await this.findPendingDispatches(remoteJid, nowSec - windowHours * 3600);
+          if (!candidates.length) return;
+
+          const { sync } = pickDispatchForSync(candidates, nowSec, windowHours);
+          const handledAt = new Date();
+          if (sync) {
+            const reserved = await this.prismaRepository.message.updateMany({
+              where: { id: sync, instanceId: this.instanceId, dispatchSyncedAt: null },
+              data: { dispatchSyncedAt: handledAt },
+            });
+            if (reserved.count === 1) claimed = sync;
+          }
+          // Os demais (mais antigos, falhos) não entram: só ficam marcados como tratados.
+          const others = candidates.map((row) => row.id).filter((id) => id !== sync);
+          if (others.length) {
+            await this.prismaRepository.message.updateMany({
+              where: { id: { in: others }, instanceId: this.instanceId, dispatchSyncedAt: null },
+              data: { dispatchSyncedAt: handledAt },
+            });
+          }
+          if (!claimed) return;
+
+          const row = await this.prismaRepository.message.findUnique({ where: { id: claimed } });
+          const sent = await this.chatwootService.eventWhatsapp(
+            Events.SEND_MESSAGE,
+            { instanceName: this.instance.name, instanceId: this.instanceId },
+            {
+              key: row.key,
+              message: row.message,
+              messageType: row.messageType,
+              messageTimestamp: row.messageTimestamp,
+              instanceId: this.instanceId,
+              source: row.source,
+            },
+          );
+          if (sent?.id) {
+            // Com os ids do Chatwoot gravados, a citação de uma resposta pelo botão do template funciona.
+            await this.prismaRepository.message.update({
+              where: { id: claimed },
+              data: {
+                chatwootMessageId: sent.id,
+                chatwootInboxId: sent.inbox_id,
+                chatwootConversationId: sent.conversation_id,
+              },
+            });
+          }
+        } catch (error) {
+          this.logger.error(`Disparo para ${remoteJid} não levado ao Chatwoot antes da resposta: ${error}`);
+          // Devolve a reserva: a próxima resposta tenta de novo.
+          if (claimed) {
+            await this.prismaRepository.message
+              .updateMany({ where: { id: claimed, instanceId: this.instanceId }, data: { dispatchSyncedAt: null } })
+              .catch(() => undefined);
+          }
+        }
+      },
+      15_000,
+    );
+  }
+
+  /** Disparos sem Chatwoot ainda pendentes para o contato (índice parcial no Postgres). */
+  private async findPendingDispatches(remoteJid: string, sinceSec: number): Promise<DispatchCandidate[]> {
+    if (this.configService.get<Database>('DATABASE').PROVIDER === 'mysql') {
+      return this.prismaRepository.message.findMany({
+        where: {
+          instanceId: this.instanceId,
+          dispatchChatwoot: false,
+          dispatchSyncedAt: null,
+          messageTimestamp: { gte: sinceSec },
+          key: { path: ['remoteJid'], equals: remoteJid },
+        },
+        select: { id: true, messageTimestamp: true, status: true },
+      });
+    }
+    return (await this.prismaRepository.$queryRaw`
+      SELECT "id", "messageTimestamp", "status" FROM "Message"
+      WHERE "instanceId" = ${this.instanceId}
+        AND "key"->>'remoteJid' = ${remoteJid}
+        AND "messageTimestamp" >= ${sinceSec}
+        AND "dispatchChatwoot" = false
+        AND "dispatchSyncedAt" IS NULL
+    `) as DispatchCandidate[];
   }
 
   /**
