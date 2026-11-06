@@ -1,4 +1,4 @@
-import { assertPublicHttpUrl, detectMime, isPrivateAddress, metaMediaError } from '@utils/metaMedia';
+import { assertPublicHttpUrl, detectMime, isHttpUrl, isPrivateAddress, metaMediaError } from '@utils/metaMedia';
 import assert from 'node:assert/strict';
 
 const MB = 1024 * 1024;
@@ -41,7 +41,14 @@ async function urlInternaRecusada() {
   await assert.rejects(assertPublicHttpUrl('http://localhost:8080/x'), 'localhost resolve para 127.0.0.1');
 }
 
-const tests = [detectaTipos, limitesDaMeta, redesInternas, urlInternaRecusada];
+function linkNaoEhIdDaMeta() {
+  // Mídia enviada por link: o "id" guardado é a URL, e não dá para pedir à Graph.
+  assert.equal(isHttpUrl('https://www.w3.org/Icons/w3c_home.png'), true);
+  assert.equal(isHttpUrl('1338946308215377'), false);
+  assert.equal(isHttpUrl(undefined), false);
+}
+
+const tests = [detectaTipos, limitesDaMeta, redesInternas, urlInternaRecusada, linkNaoEhIdDaMeta];
 
 (async () => {
   let failed = 0;

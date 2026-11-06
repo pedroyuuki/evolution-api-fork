@@ -24,7 +24,7 @@ import { AudioConverter, Chatwoot, ConfigService, Database, Openai, S3, WaBusine
 import { BadRequestException, InternalServerErrorException } from '@exceptions';
 import { createJid } from '@utils/createJid';
 import { KeyedMutex } from '@utils/keyedMutex';
-import { detectMime, downloadLimited, metaMediaError } from '@utils/metaMedia';
+import { detectMime, downloadLimited, isHttpUrl, metaMediaError } from '@utils/metaMedia';
 import { omitInlineMedia } from '@utils/omitInlineMedia';
 import { prepareAudioForCloudApi } from '@utils/prepareAudioForCloudApi';
 import { status } from '@utils/renderStatus';
@@ -255,6 +255,12 @@ export class BusinessStartupService extends ChannelStartupService {
 
     for (let attempt = 1; ; attempt++) {
       try {
+        // Mídia enviada por link: o que está guardado é a própria URL, não um id da Meta
+        // (pedir à Graph falhava e o anexo não chegava ao Chatwoot). Baixa do link.
+        if (isHttpUrl(id)) {
+          return (await downloadLimited(id, 100 * 1024 * 1024, 60_000)).buffer;
+        }
+
         const meta = await axios.get(`${URL}/${VERSION}/${id}`, {
           headers: { 'Content-Type': 'application/json', ...authorization },
           timeout: 30_000,
