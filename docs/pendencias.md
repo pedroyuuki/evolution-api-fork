@@ -57,6 +57,22 @@ Falhas encontradas e ainda não corrigidas. Os IDs são os da [auditoria de 27/1
 | CH-21 | `processAudio` do Baileys: `.on('error')` depois do `.pipe(...)` fica no stream de saída e não no comando do ffmpeg; o erro tardio "Output stream closed" (sob carga) vira uncaughtException (registrada, não derruba). Mover o `.on('error')` para antes do `.pipe` |
 | WS-1 | Websocket: token de instância conectado no namespace `/` com `GLOBAL_EVENTS` deixa de receber os eventos da própria instância (só o global recebe); `findFirst({token})` com tokens repetidos entre instâncias |
 
+### Disparador (revisão da rc15, menores)
+
+| ID | Problema |
+|---|---|
+| DSP-1 | Erros locais (rede interna, tamanho) no download por link são re-tentados 3× antes de falhar |
+| DSP-2 | Com número duplicado, um lote de status é roteado só pelo `statuses[0]` |
+| DSP-3 | O template antes da resposta só funciona para disparos pela instância original (não pela duplicada) |
+| DSP-4 | O índice parcial cresce para sempre (disparos sem resposta ficam pendentes). Fazer limpeza periódica: marcar `dispatchSyncedAt` do que passou da janela |
+| DSP-5 | O disparo sincronizado não recebe no Chatwoot os ticks de entregue/lido |
+| DSP-6 | MySQL: `findPendingDispatches` sem índice e path JSON no formato do Postgres |
+| DSP-7 | `KeyedMutex`: espera que estourou o tempo e termina antes do dono libera a chave |
+| DSP-8 | Upload sem timeout no POST à Meta; 400 também para erro de rede; o timeout do download reinicia a cada byte |
+| DSP-9 | `emitWebhook`/`chatwoot` aceitos no schema, mas ignorados no Baileys (templates são só da Cloud) |
+| DSP-10 | Ordem entre duas respostas quase simultâneas do cliente no Chatwoot (anterior à rc15) |
+| DSP-11 | rc16: A1 (templates paginados, com `TemplateService` sem estado compartilhado), A3 (saúde do número, Graph v24 ou mais nova), A6 (`strictErrors`), A7 (padrão `WA_BUSINESS_VERSION` para v25.0) |
+
 ### Incidente de 26/10
 
 - Rota pela qual a instância da Uasy recebeu eventos de outras caixas: falta consultar `webhooks` e `agent_bots` do Chatwoot de produção e o log do Traefik (ver [incidente](superpowers/research/2026-10-26-incidente-templates-cloud.md)).
