@@ -80,6 +80,12 @@ O NX-CWDash dispara campanhas de templates (de 10 a 20 mil contatos, com picos d
 ### 8. Senha do banco no log do start
 - `Docker/scripts/deploy_database.sh` deixa de imprimir o `DATABASE_URL`. Imprime só o provider.
 
+### 9. Mídia enviada por link e Chatwoot (achado no teste da Graph v25, 06/11)
+- Quando a Cloud envia mídia por URL e o Chatwoot está ligado, a sincronização chama `getBase64FromMediaMessage`.
+- O `downloadMediaMessage` trata o link como se fosse um id de mídia da Meta, e a consulta à Graph falha (`TypeError: Invalid URL`). O anexo não aparece no Chatwoot, mas a mensagem chega ao cliente.
+- **Correção:** se a mídia guardada é um link (`http`/`https`), baixar direto do link, com o mesmo tempo limite e as mesmas tentativas. A busca na Graph fica só para o id da Meta.
+- Bug anterior à rc15, sem relação com a versão da Graph: o mesmo caminho existe na v20.
+
 ## Fora de escopo (rc16 ou pendências)
 
 - A1 (paginação de templates, junto com a refatoração do `TemplateService`).
