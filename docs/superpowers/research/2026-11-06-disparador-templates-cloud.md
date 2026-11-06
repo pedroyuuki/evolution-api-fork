@@ -117,3 +117,42 @@ Abaixo, para cada item do pedido: o que o código faz hoje (conferido), o que mu
 - [WhatsApp changelog (Meta)](https://developers.facebook.com/documentation/business-messaging/whatsapp/changelog)
 - [Graph API changelog (Meta)](https://developers.facebook.com/docs/graph-api/changelog?locale=pt_BR)
 - [Media (Meta)](https://developers.facebook.com/docs/whatsapp/cloud-api/reference/media)
+
+## Revisão: riscos, casos de borda e efeito na operação atual (06/11)
+
+### O que pode afetar quem já usa a API hoje
+
+| Mudança | Efeito em produção | Como evitar |
+|---|---|---|
+| **Índice em `Message (instanceId, key->>'id')`** | As migrations rodam sozinhas no start do container (`Docker/scripts/deploy_database.sh`). Um `CREATE INDEX` comum numa `Message` grande **trava as gravações** até terminar. Isso pode levar minutos, com a Evolution fora do ar e a chance de o Swarm reiniciar o container no meio da criação. | Criar o índice **antes** da troca de imagem, com `CREATE INDEX CONCURRENTLY`, num passo documentado no release. A migration usa `IF NOT EXISTS` e vira no-op. Testar na VPS se o `prisma migrate deploy` aceita `CONCURRENTLY` sozinho num arquivo (é transacional?). |
+| Busca do status passa a usar SQL com `key->>'id'` | O Prisma, com `path: ['id']`, não gera a mesma expressão do índice. A troca vale para todas as instâncias. | Usar SQL bruto com a mesma expressão, como já fazem `getMessage` e `updateChatwootMessageId`. De quebra, o Baileys também ganha velocidade nessas buscas. |
+| `return` → `continue` no lote de status | Os status que hoje se perdiam passam a ser emitidos. É mais evento, mas correto. | Nada. Fica registrado no release. |
+| A2: campos novos no `MESSAGES_UPDATE` | Os campos `errors`, `timestamp`, `conversation` e `pricing` são aditivos. Quem valida o payload com schema rígido no n8n pode estranhar. O `error` atual continua. | Registrar no release. |
+| **A8: sempre a instância mais antiga** | **Quebraria o fluxo atual de disparo pela instância duplicada.** Hoje os status das mensagens enviadas pela duplicada chegam a ela. Escolhendo sempre a mais antiga, esses status iriam para a original, que não tem a mensagem, e se perderiam, inclusive o `webhookUrl`. | **Status:** entregar à instância **dona da mensagem**, achada pelo `wamid` entre as que têm o mesmo número. **Mensagens recebidas:** entregar à mais antiga. Assim o fluxo de hoje continua até o NX-CWDash migrar para o A5. Aviso de duplicidade no log no máximo 1× a cada 10 min. |
+| A7: mudar o padrão da versão da Graph | Produção não define `WA_BUSINESS_VERSION`, então hoje usa o padrão v18.0. **Trocar o padrão no código troca a versão em produção na atualização.** A v18 já passou da vida útil da Meta, que nesses casos atende pela versão mais antiga ainda ativa, então o salto real deve ser menor. | Fica para a rc16, com teste de texto, mídia, template, botões e carrossel na VPS em v25.0. |
+| Upload (A4) | Arquivo de até 100 MB inteiro em memória (`multer.memoryStorage()` sem limite). Vários uploads simultâneos derrubam o processo. | `limits.fileSize` por rota. No modo `url`, download em stream com corte no tamanho máximo. |
+
+### Casos de borda
+
+- **Número sem o 55, ou com/sem o 9.** O disparo para `44997091885` foi gravado como `44997091885@s.whatsapp.net`, mas a Meta normaliza para `554497091885`, e a resposta do cliente chega com esse número. A busca do A5b pelo contato nunca casaria. Hoje isso também cria um contato duplicado no Chatwoot.
+  - Nos envios com `dispatch`, gravar o `remoteJid` a partir do `contacts[0].wa_id` que a Meta devolve no envio.
+  - Recomendar ao NX-CWDash mandar sempre com DDI.
+- **A5b, template que falhou:** não sincronizar (o cliente não recebeu). Só sincronizar status `SENT`, `DELIVERED` ou `READ`.
+- **A5b, duas campanhas para o mesmo contato dentro da janela:** sincronizar só a mais recente e marcar as anteriores como tratadas, para não despejar várias de uma vez.
+- **A5b, duas respostas seguidas:** reservar com `updateMany` condicional (só sincroniza quem afetar a linha).
+- **A5b, resposta pelo botão do template:** a resposta cita o `wamid` do template. Sem a sincronização, a citação não acha a mensagem no Chatwoot. A sincronização precisa gravar o `chatwootMessageId` na linha do disparo, como o fluxo normal faz, para a citação funcionar.
+- **A5b, eco:** a mensagem sincronizada entra no Chatwoot com `source_id WAID:`, e a proteção de eco da rc14 impede que ela seja reenviada ao WhatsApp. Testar mesmo assim.
+- **A5b, desempenho:** a busca roda a cada mensagem recebida. Usar um índice parcial só das linhas com `dispatch`: `("instanceId", ("key"->>'remoteJid'), "messageTimestamp") WHERE "dispatch" IS NOT NULL`.
+- **A5 com `chatwoot:false`:** os status (lido, entregue) dessa mensagem não vão para o Chatwoot. Sem efeito, porque a mensagem não existe lá.
+- **A4:**
+  - O id de mídia é do número que fez o upload. O NX-CWDash precisa subir por instância.
+  - Conferir o tipo real pelo conteúdo do arquivo (assinatura), não só pelo informado. Tipo errado dá o erro 131053.
+- **A1:**
+  - Sem `limit`, a Meta devolve 25 por página. Quem usa hoje só via os 25 primeiros. Passar a ver todos é correção.
+  - Some o campo `paging`.
+  - Depende de corrigir antes o estado compartilhado no `TemplateService`.
+- **A3:** se a versão da Graph for anterior à v24, o campo do limite não existe. Responder `messagingLimit: null` sem erro.
+
+### Achado lateral
+
+- `Docker/scripts/deploy_database.sh` imprime o `DATABASE_URL`, **com a senha do banco**, no log do container a cada start. Isso vem da Evolution original, mas vai junto em todo log compartilhado. Fica nas pendências.
