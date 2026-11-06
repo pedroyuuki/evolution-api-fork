@@ -12,6 +12,7 @@ export interface MetaErrorResponse {
     error_type: string;
     error_subcode: number | null;
     fbtrace_id: string | null;
+    error_data: any;
     context: string;
     type: string;
   };
@@ -39,6 +40,7 @@ export function createMetaErrorResponse(error: any, context: string): MetaErrorR
       error_type: metaError.type || 'UNKNOWN',
       error_subcode: metaError.error_subcode || null,
       fbtrace_id: metaError.fbtrace_id || null,
+      error_data: metaError.error_data || null,
       context,
       type: 'whatsapp_api_error',
     },

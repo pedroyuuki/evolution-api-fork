@@ -24,6 +24,7 @@ import { AudioConverter, Chatwoot, ConfigService, Database, Openai, S3, WaBusine
 import { BadRequestException, InternalServerErrorException } from '@exceptions';
 import { createJid } from '@utils/createJid';
 import { KeyedMutex } from '@utils/keyedMutex';
+import { detectMime, downloadLimited, metaMediaError } from '@utils/metaMedia';
 import { omitInlineMedia } from '@utils/omitInlineMedia';
 import { prepareAudioForCloudApi } from '@utils/prepareAudioForCloudApi';
 import { status } from '@utils/renderStatus';
@@ -1581,6 +1582,48 @@ export class BusinessStartupService extends ChannelStartupService {
       );
       this.logger.error(`[Cloud API] Detalhes do erro: ${JSON.stringify(error.response?.data || error.message)}`);
       throw new InternalServerErrorException(error?.toString() || error);
+    }
+  }
+
+  /**
+   * Sobe a mídia para a Meta e devolve o id, para reusar em vários envios (header de
+   * template num disparo grande: a Meta não baixa a URL a cada destinatário). O id vale
+   * cerca de 30 dias e só para este número.
+   */
+  public async uploadMediaToMeta(data: { url?: string }, file?: { buffer: Buffer; originalname?: string }) {
+    let buffer: Buffer;
+    let fileName: string;
+    if (file?.buffer?.length) {
+      buffer = file.buffer;
+      fileName = file.originalname || 'media';
+    } else if (data?.url) {
+      buffer = (await downloadLimited(data.url, 100 * 1024 * 1024, 60_000)).buffer;
+      fileName = new URL(data.url).pathname.split('/').pop() || 'media';
+    } else {
+      throw new Error('Envie o arquivo (campo file, multipart) ou a url');
+    }
+
+    const mimeType = detectMime(buffer);
+    const invalid = metaMediaError(mimeType, buffer.length);
+    if (invalid) throw new Error(invalid);
+
+    const formData = new FormData();
+    formData.append('file', buffer, { filename: fileName, contentType: mimeType });
+    formData.append('type', mimeType);
+    formData.append('messaging_product', 'whatsapp');
+    const { URL: graphUrl, VERSION } = this.configService.get<WaBusiness>('WA_BUSINESS');
+
+    try {
+      const res = await axios.post(`${graphUrl}/${VERSION}/${this.number}/media`, formData, {
+        headers: { ...formData.getHeaders(), Authorization: `Bearer ${this.token}` },
+        maxBodyLength: Infinity,
+      });
+      return { id: res.data.id, mimeType, size: buffer.length };
+    } catch (error) {
+      const metaError = error?.response?.data?.error;
+      if (!metaError) throw error;
+      // Erro da Meta inteiro (code, title, message, error_data, fbtrace_id) para o createMetaErrorResponse.
+      throw Object.assign(new Error(metaError.message), { template: metaError });
     }
   }
 
