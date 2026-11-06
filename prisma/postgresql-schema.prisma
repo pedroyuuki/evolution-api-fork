@@ -152,6 +152,9 @@ model Contact {
   @@index([instanceId])
 }
 
+/// Índices criados por SQL na migration 20261106120000_disparador_rc15 (o Prisma não representa
+/// índice de expressão): "Message_instanceId_keyId_idx" e "Message_dispatch_pending_idx". Ao gerar
+/// migration nova com migrate dev, apague os DROP INDEX deles que o Prisma propuser.
 model Message {
   id                           String          @id @default(cuid())
   key                          Json            @db.JsonB
@@ -173,6 +176,11 @@ model Message {
   Media                        Media?
   webhookUrl                   String?         @db.VarChar(500)
   status                       String?         @db.VarChar(30)
+  /// Opções do disparo (sendTemplate): null = padrão (emite eventos e sincroniza com o Chatwoot)
+  dispatchEmitWebhook          Boolean?        @db.Boolean
+  dispatchChatwoot             Boolean?        @db.Boolean
+  /// Quando o disparo sem Chatwoot foi levado ao Chatwoot (resposta do cliente) ou descartado
+  dispatchSyncedAt             DateTime?       @db.Timestamp
 
   sessionId String?
   session   IntegrationSession? @relation(fields: [sessionId], references: [id])
@@ -188,6 +196,8 @@ model MessageUpdate {
   participant String?  @db.VarChar(100)
   pollUpdates Json?    @db.JsonB
   status      String   @db.VarChar(30)
+  /// Array errors da Meta quando o status falha (Cloud API)
+  errors      Json?    @db.JsonB
   Message     Message  @relation(fields: [messageId], references: [id], onDelete: Cascade)
   messageId   String
   Instance    Instance @relation(fields: [instanceId], references: [id], onDelete: Cascade)

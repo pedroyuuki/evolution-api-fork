@@ -320,6 +320,8 @@ export type Chatwoot = {
   MESSAGE_DELETE: boolean;
   MESSAGE_READ: boolean;
   BOT_CONTACT: boolean;
+  /** Horas em que um disparo sem Chatwoot ainda é levado ao Chatwoot quando o cliente responde. */
+  DISPATCH_CONTEXT_HOURS: number;
   IMPORT: {
     DATABASE: {
       CONNECTION: {
@@ -814,6 +816,7 @@ export class ConfigService {
         MESSAGE_DELETE: process.env.CHATWOOT_MESSAGE_DELETE === 'true',
         MESSAGE_READ: process.env.CHATWOOT_MESSAGE_READ === 'true',
         BOT_CONTACT: !process.env.CHATWOOT_BOT_CONTACT || process.env.CHATWOOT_BOT_CONTACT === 'true',
+        DISPATCH_CONTEXT_HOURS: Number.parseInt(process.env.CHATWOOT_DISPATCH_CONTEXT_HOURS) || 72,
         IMPORT: {
           DATABASE: {
             CONNECTION: {
