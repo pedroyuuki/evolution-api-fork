@@ -1,4 +1,11 @@
-import { assertPublicHttpUrl, detectMime, isHttpUrl, isPrivateAddress, metaMediaError } from '@utils/metaMedia';
+import {
+  assertPublicHttpUrl,
+  detectMime,
+  guardedLookup,
+  isHttpUrl,
+  isPrivateAddress,
+  metaMediaError,
+} from '@utils/metaMedia';
 import assert from 'node:assert/strict';
 
 const MB = 1024 * 1024;
@@ -48,7 +55,40 @@ function linkNaoEhIdDaMeta() {
   assert.equal(isHttpUrl(undefined), false);
 }
 
-const tests = [detectaTipos, limitesDaMeta, redesInternas, urlInternaRecusada, linkNaoEhIdDaMeta];
+function ipv6QueEmbuteIpv4Interno() {
+  // O parser de URL normaliza [::ffff:127.0.0.1] para ::ffff:7f00:1 (hexadecimal).
+  for (const ip of ['::ffff:7f00:1', '::ffff:a9fe:a9fe', '0:0:0:0:0:ffff:7f00:1', '::7f00:1', '64:ff9b::7f00:1', '2002:7f00:1::', '2002:a00:1::1']) {
+    assert.equal(isPrivateAddress(ip), true, ip);
+  }
+  for (const ip of ['::ffff:808:808', '64:ff9b::808:808', '2002:808:808::1']) {
+    assert.equal(isPrivateAddress(ip), false, ip);
+  }
+}
+
+async function urlComIpEmbutidoOuNumericoRecusada() {
+  await assert.rejects(assertPublicHttpUrl('http://[::ffff:127.0.0.1]/x'));
+  await assert.rejects(assertPublicHttpUrl('http://[::ffff:169.254.169.254]/latest/meta-data'));
+  await assert.rejects(assertPublicHttpUrl('http://2130706433/x'), 'decimal de 127.0.0.1');
+  await assert.rejects(assertPublicHttpUrl('http://0x7f.0.0.1/x'));
+}
+
+async function conexaoConfereOIpResolvido() {
+  // DNS rebinding: o host pode resolver público na checagem e interno na conexão. O lookup
+  // da conexão confere de novo.
+  const err = await new Promise((resolve) => guardedLookup('localhost', {}, (e: any) => resolve(e)));
+  assert.ok(err, 'localhost (127.0.0.1) recusado na conexão');
+}
+
+const tests = [
+  conexaoConfereOIpResolvido,
+  detectaTipos,
+  limitesDaMeta,
+  redesInternas,
+  urlInternaRecusada,
+  linkNaoEhIdDaMeta,
+  ipv6QueEmbuteIpv4Interno,
+  urlComIpEmbutidoOuNumericoRecusada,
+];
 
 (async () => {
   let failed = 0;

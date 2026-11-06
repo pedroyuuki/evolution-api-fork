@@ -1,5 +1,8 @@
 import axios from 'axios';
+import dns from 'dns';
 import { lookup } from 'dns/promises';
+import http from 'http';
+import https from 'https';
 import { isIP } from 'net';
 import { Readable } from 'stream';
 
@@ -68,17 +71,46 @@ const PRIVATE_V4: Array<[string, number]> = [
   ['240.0.0.0', 4],
 ];
 
-/** Endereço de rede interna, loopback, link-local, metadados de nuvem etc. */
+/** IPv6 em 8 grupos de 16 bits (aceita "::" e IPv4 com pontos no fim), ou null se inválido. */
+function ipv6Hextets(value: string): number[] | null {
+  let text = value;
+  const dotted = text.match(/^(.*:)(\d+\.\d+\.\d+\.\d+)$/);
+  if (dotted) {
+    const n = ipv4ToInt(dotted[2]);
+    text = `${dotted[1]}${(n >>> 16).toString(16)}:${(n & 0xffff).toString(16)}`;
+  }
+  const halves = text.split('::');
+  if (halves.length > 2) return null;
+  const head = halves[0] ? halves[0].split(':') : [];
+  const tail = halves.length === 2 && halves[1] ? halves[1].split(':') : [];
+  const missing = 8 - head.length - tail.length;
+  if (missing < 0 || (halves.length === 1 && missing !== 0)) return null;
+  const groups = [...head, ...Array(halves.length === 2 ? missing : 0).fill('0'), ...tail];
+  if (groups.length !== 8 || groups.some((g) => !/^[0-9a-f]{1,4}$/.test(g))) return null;
+  return groups.map((g) => parseInt(g, 16));
+}
+
+const v4From = (high: number, low: number) => `${high >> 8}.${high & 0xff}.${low >> 8}.${low & 0xff}`;
+
+/**
+ * Endereço de rede interna, loopback, link-local, metadados de nuvem etc. No IPv6, inclusive
+ * as formas que embutem um IPv4 (mapeado ::ffff:, compatível, NAT64 64:ff9b::/96, 6to4
+ * 2002::/16): o parser de URL normaliza [::ffff:127.0.0.1] para ::ffff:7f00:1.
+ */
 export function isPrivateAddress(ip: string): boolean {
   const value = ip.replace(/^\[|\]$/g, '').toLowerCase();
-  const mapped = value.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
-  if (mapped) return isPrivateAddress(mapped[1]);
   if (isIP(value) === 4) return PRIVATE_V4.some(([base, bits]) => inRange(value, base, bits));
-  if (isIP(value) === 6) {
-    if (value === '::' || value === '::1') return true;
-    return /^f[cd]/.test(value) || /^fe[89ab]/.test(value);
-  }
-  return true; // não é IP válido: trata como inseguro
+  if (isIP(value) !== 6) return true; // não é IP válido: trata como inseguro
+
+  const h = ipv6Hextets(value);
+  if (!h) return true;
+  const zeros = (from: number, to: number) => h.slice(from, to).every((g) => g === 0);
+  if (zeros(0, 8) || (zeros(0, 7) && h[7] === 1)) return true; // :: e ::1
+  if (zeros(0, 5) && h[5] === 0xffff) return isPrivateAddress(v4From(h[6], h[7])); // mapeado
+  if (zeros(0, 6)) return isPrivateAddress(v4From(h[6], h[7])); // compatível (obsoleto)
+  if (h[0] === 0x64 && h[1] === 0xff9b && zeros(2, 6)) return isPrivateAddress(v4From(h[6], h[7])); // NAT64
+  if (h[0] === 0x2002) return isPrivateAddress(v4From(h[1], h[2])); // 6to4
+  return (h[0] & 0xfe00) === 0xfc00 || (h[0] & 0xffc0) === 0xfe80 || (h[0] & 0xffc0) === 0xfec0 || h[0] >> 8 === 0xff;
 }
 
 /** Só http/https e só hosts que resolvem para endereços públicos. */
@@ -100,6 +132,24 @@ export async function assertPublicHttpUrl(url: string): Promise<URL> {
   return parsed;
 }
 
+/**
+ * Lookup usado na conexão: confere de novo o IP resolvido. Sem isso, um host que resolve
+ * público na checagem e interno na conexão (DNS rebinding) passaria.
+ */
+export function guardedLookup(hostname: string, options: any, callback: (...args: any[]) => void) {
+  dns.lookup(hostname, { ...(options ?? {}), all: true }, (error, addresses: dns.LookupAddress[]) => {
+    if (error) return callback(error);
+    if (!addresses?.length || addresses.some((entry) => isPrivateAddress(entry.address))) {
+      return callback(Object.assign(new Error(`${hostname} resolve para rede interna`), { code: 'EPRIVATE' }));
+    }
+    if (options?.all) return callback(null, addresses);
+    callback(null, addresses[0].address, addresses[0].family);
+  });
+}
+
+const guardedHttpAgent = new http.Agent({ lookup: guardedLookup as any });
+const guardedHttpsAgent = new https.Agent({ lookup: guardedLookup as any });
+
 export function isHttpUrl(value: unknown): value is string {
   return typeof value === 'string' && /^https?:\/\//i.test(value);
 }
@@ -120,6 +170,9 @@ export async function downloadLimited(
       responseType: 'stream',
       timeout: timeoutMs,
       maxRedirects: 0,
+      httpAgent: guardedHttpAgent,
+      httpsAgent: guardedHttpsAgent,
+      proxy: false,
       validateStatus: (status) => status >= 200 && status < 400,
     });
     if (response.status >= 300) {
