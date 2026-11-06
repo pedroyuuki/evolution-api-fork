@@ -1,4 +1,4 @@
-import { pickDispatchForSync } from '@api/integrations/channel/meta/dispatch-context';
+import { pickDispatchForSync, syncSucceeded } from '@api/integrations/channel/meta/dispatch-context';
 import { KeyedMutex } from '@utils/keyedMutex';
 import assert from 'node:assert/strict';
 
@@ -69,7 +69,16 @@ async function statusPendenteTambemVale() {
   assert.equal(pickDispatchForSync([{ id: 'n', messageTimestamp: now - 5, status: null }], now, 72).sync, 'n');
 }
 
+async function falhaDoChatwootDevolveAReserva() {
+  // eventWhatsapp engole erro e devolve undefined: sem id, a reserva volta e a próxima resposta tenta.
+  assert.equal(syncSucceeded(undefined), false);
+  assert.equal(syncSucceeded(null), false);
+  assert.equal(syncSucceeded({}), false);
+  assert.equal(syncSucceeded({ id: 4453728, conversation_id: 174663 }), true);
+}
+
 const tests = [
+  falhaDoChatwootDevolveAReserva,
   mutexSerializaPorChave,
   mutexNaoTravaNoTimeout,
   mutexRepassaOErro,

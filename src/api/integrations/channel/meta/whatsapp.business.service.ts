@@ -36,7 +36,7 @@ import FormData from 'form-data';
 import mimeTypes from 'mime-types';
 import { join } from 'path';
 
-import { DispatchCandidate, pickDispatchForSync } from './dispatch-context';
+import { DispatchCandidate, pickDispatchForSync, syncSucceeded } from './dispatch-context';
 import { dispatchColumns, dispatchOptions, optionsFromRow, resolveRecipientNumber } from './dispatch-options';
 import { buildStatusUpdate } from './status-update';
 
@@ -1083,17 +1083,18 @@ export class BusinessStartupService extends ChannelStartupService {
               source: row.source,
             },
           );
-          if (sent?.id) {
-            // Com os ids do Chatwoot gravados, a citação de uma resposta pelo botão do template funciona.
-            await this.prismaRepository.message.update({
-              where: { id: claimed },
-              data: {
-                chatwootMessageId: sent.id,
-                chatwootInboxId: sent.inbox_id,
-                chatwootConversationId: sent.conversation_id,
-              },
-            });
+          if (!syncSucceeded(sent)) {
+            throw new Error('o Chatwoot não criou a mensagem do disparo');
           }
+          // Com os ids do Chatwoot gravados, a citação de uma resposta pelo botão do template funciona.
+          await this.prismaRepository.message.update({
+            where: { id: claimed },
+            data: {
+              chatwootMessageId: sent.id,
+              chatwootInboxId: sent.inbox_id,
+              chatwootConversationId: sent.conversation_id,
+            },
+          });
         } catch (error) {
           this.logger.error(`Disparo para ${remoteJid} não levado ao Chatwoot antes da resposta: ${error}`);
           // Devolve a reserva: a próxima resposta tenta de novo.

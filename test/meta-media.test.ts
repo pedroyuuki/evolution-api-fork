@@ -79,7 +79,21 @@ async function conexaoConfereOIpResolvido() {
   assert.ok(err, 'localhost (127.0.0.1) recusado na conexão');
 }
 
+function soMp4E3gpDeVerdade() {
+  const ftyp = (brand: string) => Buffer.from(`\0\0\0\x18ftyp${brand}\0\0\0\0`, 'binary');
+  for (const brand of ['isom', 'iso2', 'mp41', 'mp42', 'avc1', 'M4V ', 'mmp4', 'dash']) {
+    assert.equal(detectMime(ftyp(brand)), 'video/mp4', brand);
+  }
+  for (const brand of ['3gp4', '3gp5', '3gp6']) assert.equal(detectMime(ftyp(brand)), 'video/3gpp', brand);
+  // Foto HEIC do iPhone, AVIF, áudio M4A, QuickTime e 3GPP2 passariam como vídeo e a Meta
+  // só recusaria depois, em cada envio do disparo.
+  for (const brand of ['heic', 'heix', 'mif1', 'msf1', 'avif', 'M4A ', 'qt  ', '3g2a']) {
+    assert.equal(detectMime(ftyp(brand)), null, brand);
+  }
+}
+
 const tests = [
+  soMp4E3gpDeVerdade,
   conexaoConfereOIpResolvido,
   detectaTipos,
   limitesDaMeta,

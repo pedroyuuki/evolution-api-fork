@@ -23,6 +23,21 @@ export const META_MEDIA_LIMITS: Record<string, number> = {
   'application/pdf': 100 * MB,
 };
 
+const MP4_BRANDS = new Set([
+  'isom',
+  'iso2',
+  'iso3',
+  'iso4',
+  'iso5',
+  'iso6',
+  'mp41',
+  'mp42',
+  'avc1',
+  'M4V ',
+  'mmp4',
+  'dash',
+]);
+
 /** Tipo pela assinatura do arquivo (não pelo nome nem pelo que o cliente informou). */
 export function detectMime(buf: Buffer): string | null {
   if (!buf || buf.length < 4) return null;
@@ -30,7 +45,11 @@ export function detectMime(buf: Buffer): string | null {
   if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return 'image/png';
   if (buf.subarray(0, 4).toString('latin1') === '%PDF') return 'application/pdf';
   if (buf.length >= 12 && buf.subarray(4, 8).toString('latin1') === 'ftyp') {
-    return buf.subarray(8, 10).toString('latin1') === '3g' ? 'video/3gpp' : 'video/mp4';
+    // O container ISO (ftyp) também é usado por HEIC/AVIF, M4A e QuickTime: só as marcas de
+    // MP4 e 3GPP de vídeo passam, senão a Meta aceita o upload e recusa cada envio.
+    const brand = buf.subarray(8, 12).toString('latin1');
+    if (MP4_BRANDS.has(brand)) return 'video/mp4';
+    if (/^3gp\d$/.test(brand) || brand === '3gs7' || brand === '3ge6' || brand === '3ge7') return 'video/3gpp';
   }
   return null;
 }

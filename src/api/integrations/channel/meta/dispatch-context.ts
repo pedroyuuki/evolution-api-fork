@@ -19,3 +19,12 @@ export function pickDispatchForSync(
     .sort((a, b) => b.messageTimestamp - a.messageTimestamp);
   return { sync: eligible[0]?.id ?? null, skip: eligible.slice(1).map((row) => row.id) };
 }
+
+/**
+ * A mensagem do disparo entrou no Chatwoot. O eventWhatsapp engole os erros e devolve
+ * undefined: sem o id da mensagem criada, a reserva precisa voltar para a próxima resposta
+ * tentar de novo (senão o disparo ficava marcado e nunca aparecia).
+ */
+export function syncSucceeded(sent: any): boolean {
+  return !!sent?.id;
+}
