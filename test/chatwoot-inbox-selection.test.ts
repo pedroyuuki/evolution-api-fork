@@ -1,14 +1,14 @@
 import { isOwnInbox, mustBlockSend, pickOwnInbox } from '@api/integrations/chatbot/chatwoot/utils/inbox-selection';
 import assert from 'node:assert/strict';
 
-const EVO = 'https://evo.c2m.nexawise.com.br/chatwoot/webhook/';
-const PROD_NAME = 'GG - SUPORTE GRATUITO (API)';
+const EVO = 'https://evo.exemplo.com.br/chatwoot/webhook/';
+const PROD_NAME = 'Suporte Gratuito (API)';
 
 function nomeContinuaSendoOCriterioPrincipal() {
   // Compatibilidade: onde o nome já funcionava, a caixa escolhida é a mesma, mesmo que
   // outra caixa aponte para a instância.
   const inboxes = [
-    { id: 120, name: 'GG - Andrei', webhook_url: EVO + 'X' },
+    { id: 120, name: 'Caixa do Parceiro', webhook_url: EVO + 'X' },
     { id: 160, name: 'Caixa X', webhook_url: EVO + 'outra' },
   ];
   assert.equal(pickOwnInbox(inboxes, 'X', 'Caixa X').inbox?.id, 160);

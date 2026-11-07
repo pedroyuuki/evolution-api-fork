@@ -21,7 +21,7 @@
 ## Foco da revisão
 
 1. Payload do Chatwoot sem `inbox` e sem `conversation.inbox_id` (eventos antigos/forjados): não pode enviar quando a caixa da instância é desconhecida; com caixa conhecida e evento sem caixa, segue como hoje (o guard de eco e de caixa continuam). Teste na Tarefa 5.
-2. Nome de instância com espaço/acentos/parênteses (produção tem `GG - SUPORTE GRATUITO (API)`, URL com `%20`): a comparação com `webhook_url` decodifica a URL. Teste na Tarefa 5.
+2. Nome de instância com espaço/acentos/parênteses (produção tem `Suporte Gratuito (API)`, URL com `%20`): a comparação com `webhook_url` decodifica a URL. Teste na Tarefa 5.
 3. `fetchInstances` chamado com token de instância e sem `instanceName` continua passando; `/instance/create` com a chave global continua passando. Teste na Tarefa 2.
 4. Webhook da Meta com um único entry (o caso normal) gera exatamente o mesmo objeto que hoje é passado ao serviço. Teste na Tarefa 4.
 5. Mensagem de saída do Chatwoot repetida (mesmo `body.id`) depois de já enviada: não reenvia; mensagem nova com id diferente: envia. Teste na Tarefa 7.
@@ -106,7 +106,7 @@
 - Produz: `mustBlockSend(ownInboxId: number | null | undefined): boolean` → true quando a caixa da instância é desconhecida.
 - Consome: `isFromAnotherInbox` existente.
 
-- [ ] **Passo 1: testes que falham** — caixa com `webhook_url` `https://evo/chatwoot/webhook/GG%20-%20SUPORTE%20GRATUITO%20(API)` é escolhida para a instância `GG - SUPORTE GRATUITO (API)` mesmo com outro nome; duas caixas com o mesmo nome e nenhuma URL da instância → a primeira, `ambiguous: true`; caixa renomeada mas com URL da instância → achada; nenhuma → `{inbox:null}`; `mustBlockSend(null) === true`, `mustBlockSend(162) === false`.
+- [ ] **Passo 1: testes que falham** — caixa com `webhook_url` `https://evo/chatwoot/webhook/GG%20-%20SUPORTE%20GRATUITO%20(API)` é escolhida para a instância `Suporte Gratuito (API)` mesmo com outro nome; duas caixas com o mesmo nome e nenhuma URL da instância → a primeira, `ambiguous: true`; caixa renomeada mas com URL da instância → achada; nenhuma → `{inbox:null}`; `mustBlockSend(null) === true`, `mustBlockSend(162) === false`.
 - [ ] **Passo 2:** rodar → falha.
 - [ ] **Passo 3:** `getInbox` usa `pickOwnInbox` (cache continua validado pelo nome OU pelo id da caixa escolhida; com `ambiguous`, `logger.error` dizendo o nome repetido); em `receiveWebhook`, depois do guard de outra caixa, para `message_created` de saída e `message_updated` com `deleted`: `if (mustBlockSend(ownInbox?.id))` → `logger.error` e `return { message: 'bot' }`; `notifyUnsentMessage` não escreve quando `isFromAnotherInbox(body, (await this.getInbox(instance))?.id)`.
 - [ ] **Passo 4:** teste, tsc, eslint.

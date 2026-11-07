@@ -75,7 +75,7 @@ Falhas encontradas e ainda não corrigidas. Os IDs são os da [auditoria de 27/1
 
 ### Incidente de 26/10
 
-- Rota pela qual a instância da Uasy recebeu eventos de outras caixas: falta consultar `webhooks` e `agent_bots` do Chatwoot de produção e o log do Traefik (ver [incidente](superpowers/research/2026-10-26-incidente-templates-cloud.md)).
+- Rota pela qual a instância da parceiro recebeu eventos de outras caixas: falta consultar `webhooks` e `agent_bots` do Chatwoot de produção e o log do Traefik (ver [incidente](superpowers/research/2026-10-26-incidente-templates-cloud.md)).
 
 ## Resolvidas
 
