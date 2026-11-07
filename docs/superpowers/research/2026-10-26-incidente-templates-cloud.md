@@ -14,7 +14,7 @@ Todos os 7 casos foram em conversas NOVAS no Chatwoot. Na instalação de produ�
 
 ## Em aberto
 
-Por qual rota a instância da parceiro recebeu eventos de caixas que não são dela. Inbox webhook só dispara para a própria caixa. Falta consultar no Chatwoot de produção:
+Por qual rota a instância do parceiro recebeu eventos de caixas que não são dela. Inbox webhook só dispara para a própria caixa. Falta consultar no Chatwoot de produção:
 
 - `select id, url, subscriptions from webhooks where account_id = 11;` (webhooks da conta)
 - `select id, name, outgoing_url from agent_bots;` (agentes-robô)
